@@ -344,7 +344,8 @@ struct TerminalContentBuilder {
             workingDirectory: currentState.workingDirectory,
             agents: currentState.agents,
             frozenGrid: currentState.frozenGrid,
-            sessionName: currentState.sessionName
+            sessionName: currentState.sessionName,
+            isDiscovered: currentState.isDiscovered
           )
         }
         let plan = TerminalSurfaceRecipe.plan(

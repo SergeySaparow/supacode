@@ -239,6 +239,22 @@ struct ZmxSessionListParserTests {
     #expect(entries.isEmpty)
   }
 
+  @Test func remoteListingCanIncludeExternalSessionNames() {
+    let entries = ZmxSessionListParser.parse(
+      "name=manual shell\tpid=1\tclients=0\tcreated=0\n",
+      includingExternalNames: true
+    )
+    #expect(entries == [.init(name: "manual shell", clients: 0)])
+  }
+
+  @Test func localDiscoveryListingIncludesExternalSessionNames() {
+    let entries = ZmxSessionListParser.parse(
+      "name=New_1\tpid=1\tclients=1\tcreated=0\n",
+      includingExternalNames: true
+    )
+    #expect(entries == [.init(name: "New_1", clients: 1)])
+  }
+
   @Test func dropsBlankAndMalformedLines() {
     let entries = ZmxSessionListParser.parse(
       """
@@ -249,6 +265,13 @@ struct ZmxSessionListParserTests {
       """
     )
     #expect(entries == [.init(name: "supa-keep", clients: 3)])
+  }
+
+  @Test func remoteListInvocationRunsZmxLsOnTheHost() {
+    let invocation = ZmxAttach.remoteListInvocation(host: RemoteHost(alias: "devbox"))
+    #expect(invocation.executableURL == URL(filePath: "/usr/bin/ssh"))
+    #expect(invocation.arguments.contains { $0.contains("zmx ls") })
+    #expect(invocation.arguments.contains("BatchMode=yes"))
   }
 
 }
@@ -274,6 +297,7 @@ struct ZmxClientKillSurfaceSessionsTests {
       killSession: { _ in await recorder.record("local") },
       killRemoteSession: { _, _ in await recorder.record("remote") },
       listSessionsWithClients: { nil },
+      listRemoteSessions: { _ in nil }
     )
   }
 

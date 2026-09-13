@@ -46,6 +46,7 @@ enum LayoutPersistence {
               agents: agents,
               frozenGrid: state.frozenGrid,
               sessionName: state.sessionName,
+              isDiscovered: state.isDiscovered,
               launch: state.launch
             )
           )
@@ -68,7 +69,8 @@ enum LayoutPersistence {
               workingDirectory: state.workingDirectory,
               agents: state.agents,
               frozenGrid: state.frozenGrid,
-              sessionName: state.sessionName
+              sessionName: state.sessionName,
+              isDiscovered: state.isDiscovered
             )
           )
         )

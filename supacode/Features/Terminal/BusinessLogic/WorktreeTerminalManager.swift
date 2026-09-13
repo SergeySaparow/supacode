@@ -21,7 +21,7 @@ final class WorktreeTerminalManager {
   /// The app store; topology commands route into `TerminalsFeature` through it.
   /// Set once from the app shell right after store creation.
   weak var appStore: Store<AppFeature.State, AppFeature.Action>?
-  /// Sessions an unexpected-close probe decided to spare; the session killer
+  /// Sessions whose zmx owner must survive content teardown; the session killer
   /// consumes an entry to skip the zmx kill for that content.
   private var sessionsToSpare: Set<UUID> = []
   /// Sessions closing without an explicit user action; the session killer
@@ -71,6 +71,15 @@ final class WorktreeTerminalManager {
   @ObservationIgnored private let clock: any Clock<Duration>
   @ObservationIgnored @Dependency(\.zmxClient) private var zmxClient
   @ObservationIgnored @Dependency(\.analyticsClient) private var analyticsClient
+  /// Pollers are keyed by raw routes; reconciliation uses canonical endpoint
+  /// identities so equivalent routes still share imported-session ownership.
+  @ObservationIgnored private var remoteSessionScanTasks: [RemoteHost: Task<Void, Never>] = [:]
+  @ObservationIgnored private var localSessionScanTask: Task<Void, Never>?
+  @ObservationIgnored private var remoteEndpointIdentities: [RemoteHost: String] = [:]
+  /// Exact host-side names survive layout teardown long enough for async close
+  /// effects to decide which session to kill.
+  @ObservationIgnored private var remoteSessionNames: [UUID: String] = [:]
+  @ObservationIgnored private var discoveredRemoteSessionIDs: Set<UUID> = []
   /// Serialized off-main writer that merges per-worktree layout changes into
   /// `layouts.json` without clobbering keys it isn't carrying. Built from the
   /// dependency context at init so async flushes use the same storage the test
@@ -95,6 +104,8 @@ final class WorktreeTerminalManager {
   /// Holds `.idle` long enough to collapse PostToolUse/PreToolUse busy/idle alternation
   /// into a sustained busy; stays sub-perceptible for the badge clearing at end-of-session.
   private static let idleHookDebounceDuration: Duration = .milliseconds(400)
+  private static let remoteSessionScanInterval: Duration = .seconds(30)
+  private static let localSessionEndpoint = "local"
 
   private struct IdleDebounceKey: Hashable {
     let surfaceID: UUID
@@ -201,6 +212,8 @@ final class WorktreeTerminalManager {
     for task in pendingIdleHookEvents.values { task.cancel() }
     for task in layoutDirtyTasks.values { task.cancel() }
     for entry in layoutFlushTasks.values { entry.task.cancel() }
+    for task in remoteSessionScanTasks.values { task.cancel() }
+    localSessionScanTask?.cancel()
     for observer in runtimeObservers {
       NotificationCenter.default.removeObserver(observer)
     }
@@ -707,6 +720,8 @@ final class WorktreeTerminalManager {
     // its minted-title prefix stamped.
     sendTerminals(.attachLayout(worktreeID: worktree.id, titlePrefix: worktree.name))
     if let existing = hosts[worktree.id] {
+      rememberRemoteSessionNames(in: worktree.id)
+      startSessionDiscovery(for: worktree.host)
       if runSetupScriptIfNew() {
         existing.enableSetupScriptIfNeeded()
       }
@@ -796,8 +811,253 @@ final class WorktreeTerminalManager {
     // close would diff against an empty set and skip its cleanup; this also
     // starts the dormant watchers for restored contents.
     host.reconcileContentLifecycle()
+    rememberRemoteSessionNames(in: worktree.id)
+    startSessionDiscovery(for: worktree.host)
     terminalLogger.info("Created content host for worktree \(worktree.id)")
     return host
+  }
+
+  private func startSessionDiscovery(for remoteHost: RemoteHost?) {
+    if let remoteHost {
+      startRemoteSessionScan(for: remoteHost)
+    } else {
+      startLocalSessionScan()
+    }
+  }
+
+  private func startRemoteSessionScan(for remoteHost: RemoteHost) {
+    guard remoteSessionScanTasks[remoteHost] == nil else { return }
+    let clock = self.clock
+    remoteSessionScanTasks[remoteHost] = Task { @MainActor [weak self] in
+      while !Task.isCancelled {
+        if self?.settingsFile.global.remoteSessionDiscoveryEnabled == true {
+          await self?.scanRemoteSessions(on: remoteHost)
+        }
+        do {
+          try await clock.sleep(for: Self.remoteSessionScanInterval)
+        } catch {
+          return
+        }
+      }
+    }
+  }
+
+  private func startLocalSessionScan() {
+    guard localSessionScanTask == nil else { return }
+    let clock = self.clock
+    localSessionScanTask = Task { @MainActor [weak self] in
+      while !Task.isCancelled {
+        if self?.settingsFile.global.remoteSessionDiscoveryEnabled == true {
+          await self?.scanLocalSessions()
+        }
+        do {
+          try await clock.sleep(for: Self.remoteSessionScanInterval)
+        } catch {
+          return
+        }
+      }
+    }
+  }
+
+  private func stopRemoteSessionScanIfUnused(_ remoteHost: RemoteHost?) {
+    guard let remoteHost else { return }
+    guard !hosts.values.contains(where: { $0.worktree.host == remoteHost }) else { return }
+    remoteSessionScanTasks.removeValue(forKey: remoteHost)?.cancel()
+    remoteEndpointIdentities.removeValue(forKey: remoteHost)
+  }
+
+  private func stopLocalSessionScanIfUnused() {
+    guard !hosts.values.contains(where: { $0.worktree.host == nil }) else { return }
+    localSessionScanTask?.cancel()
+    localSessionScanTask = nil
+  }
+
+  private func scanRemoteSessions(on remoteHost: RemoteHost) async {
+    let endpoint = await endpointIdentity(for: remoteHost)
+    guard let entries = await zmxClient.listRemoteSessions(remoteHost) else {
+      terminalLogger.info("Skipping remote zmx discovery for \(remoteHost.displayAuthority): probe unavailable")
+      return
+    }
+
+    // Resolve every known route before building the global set. This lets an
+    // explicit-user route and its SSH alias see each other's open tabs even
+    // when one of the layouts is currently hibernated.
+    let remoteHosts = knownWorktrees().compactMap(\.host).reduce(into: Set([remoteHost])) { result, host in
+      result.insert(host)
+    }
+    for host in remoteHosts {
+      _ = await endpointIdentity(for: host)
+    }
+    reconcileSessions(entries, endpoint: endpoint)
+  }
+
+  private func scanLocalSessions() async {
+    guard let entries = await zmxClient.listLocalSessions() else {
+      terminalLogger.info("Skipping local zmx discovery: probe unavailable")
+      return
+    }
+    let remoteWrappers = localRemoteWrapperSessionNames()
+    removeLocalRemoteWrapperTabs(named: remoteWrappers)
+    reconcileSessions(
+      ZmxSessionReconciliation.localDiscoveryEntries(
+        entries,
+        excludingRemoteWrappers: remoteWrappers
+      ),
+      endpoint: Self.localSessionEndpoint
+    )
+  }
+
+  private func endpointIdentity(for remoteHost: RemoteHost) async -> String {
+    if let cached = remoteEndpointIdentities[remoteHost] {
+      return cached
+    }
+    let identity =
+      await zmxClient.resolveRemoteEndpoint(remoteHost)
+      ?? ZmxRemoteEndpointIdentity.fallback(remoteHost)
+    remoteEndpointIdentities[remoteHost] = identity
+    return identity
+  }
+
+  private func reconcileSessions(
+    _ remoteEntries: [ZmxSessionListParser.Entry],
+    endpoint: String
+  ) {
+    guard let worktreeID = discoveryTargetWorktreeID(for: endpoint),
+      let layout = layoutState(for: worktreeID)?.layout,
+      let paneID = layout.focusedPaneID ?? layout.panes.first?.id
+    else { return }
+
+    let missingNames = ZmxSessionReconciliation.missingNames(
+      remote: remoteEntries,
+      endpoint: endpoint,
+      openSessions: openSessionsByEndpoint()
+    )
+    for name in missingNames {
+      let contentID = ContentID()
+      let tabID = TabID()
+      remoteSessionNames[contentID.rawValue] = name
+      discoveredRemoteSessionIDs.insert(contentID.rawValue)
+      sendLayout(
+        worktreeID,
+        .newTab(
+          inPane: paneID,
+          spec: NewTabSpec(
+            tabID: tabID,
+            contentID: contentID,
+            title: name,
+            content: .terminal(
+              TerminalContentState(
+                workingDirectory: nil,
+                sessionName: name,
+                isDiscovered: true
+              )
+            ),
+            geometry: ContentRuntime.liveValue.spawnGeometry(
+              near: layout.panes[id: paneID]?.selectedTab?.content.id
+            ),
+            select: false
+          )
+        )
+      )
+      guard layoutState(for: worktreeID)?.layout.tab(containingContent: contentID) != nil else {
+        remoteSessionNames.removeValue(forKey: contentID.rawValue)
+        discoveredRemoteSessionIDs.remove(contentID.rawValue)
+        continue
+      }
+    }
+  }
+
+  private func openSessionsByEndpoint() -> [ZmxSessionReconciliation.OpenSession] {
+    knownWorktreeLayouts().flatMap {
+      worktree, layout -> [ZmxSessionReconciliation.OpenSession] in
+      let endpoint =
+        worktree.host
+        .map { remoteEndpointIdentities[$0] ?? ZmxRemoteEndpointIdentity.fallback($0) }
+        ?? Self.localSessionEndpoint
+      return layout.panes.flatMap(\.tabs).compactMap { tab in
+        guard case .terminal(let state) = tab.content.state else { return nil }
+        return .init(
+          endpoint: endpoint,
+          name: state.sessionName ?? ZmxSessionID.make(surfaceID: tab.content.id.rawValue)
+        )
+      }
+    }
+  }
+
+  private func discoveryTargetWorktreeID(for endpoint: String) -> Worktree.ID? {
+    let endpointIdentities = remoteEndpointIdentities
+    return knownWorktrees().first { worktree in
+      guard worktree.isFolder else { return false }
+      guard let host = worktree.host else { return endpoint == Self.localSessionEndpoint }
+      return endpointIdentities[host] == endpoint
+    }?.id
+  }
+
+  /// The repository roster includes hibernated worktrees whose content hosts
+  /// are not live. Discovery must still account for their persisted tabs.
+  private func knownWorktrees() -> [Worktree] {
+    var result: [Worktree] = appStore?.withState {
+      $0.repositories.repositories.flatMap(\.worktrees)
+    } ?? []
+    var seen = Set(result.map(\.id))
+    for worktree in hosts.values.map(\.worktree).sorted(by: { $0.id.rawValue < $1.id.rawValue }) {
+      guard seen.insert(worktree.id).inserted else { continue }
+      result.append(worktree)
+    }
+    return result
+  }
+
+  private func knownWorktreeLayouts() -> [(worktree: Worktree, layout: PaneLayout)] {
+    knownWorktrees().compactMap { worktree in
+      layoutState(for: worktree.id).map { (worktree: worktree, layout: $0.layout) }
+    }
+  }
+
+  /// Names of the local zmx sessions that only wrap remote surfaces. The
+  /// remote host session may have an arbitrary name, but its local wrapper is
+  /// always derived from the remote surface UUID.
+  private func localRemoteWrapperSessionNames() -> Set<String> {
+    Set(
+      knownWorktreeLayouts().flatMap { (worktree, layout) -> [String] in
+        guard worktree.host != nil else { return [] }
+        return layout.panes.flatMap(\.tabs).map {
+          ZmxSessionID.make(surfaceID: $0.content.id.rawValue)
+        }
+      }
+    )
+  }
+
+  /// Removes duplicate local bookmarks created by older builds when the local
+  /// scanner mistook remote zmx wrappers for independent local sessions.
+  private func removeLocalRemoteWrapperTabs(named names: Set<String>) {
+    guard !names.isEmpty else { return }
+    for (worktree, layout) in knownWorktreeLayouts() where worktree.host == nil {
+      for tab in layout.panes.flatMap(\.tabs) {
+        guard case .terminal(let state) = tab.content.state,
+          state.isDiscovered,
+          let name = state.sessionName,
+          names.contains(name)
+        else { continue }
+        // Removing a stale bookmark must not kill the corresponding zmx
+        // session; it is still owned by the remote surface.
+        sessionsToSpare.insert(tab.content.id.rawValue)
+        sendLayout(worktree.id, .closeTab(id: tab.id))
+        terminalLogger.info(
+          "Removed stale local bookmark \(name) that belongs to remote worktree \(worktree.id)")
+      }
+    }
+  }
+
+  private func rememberRemoteSessionNames(in worktreeID: Worktree.ID) {
+    guard let layout = layoutState(for: worktreeID)?.layout else { return }
+    for tab in layout.panes.flatMap(\.tabs) {
+      guard case .terminal(let state) = tab.content.state else { continue }
+      let contentID = tab.content.id.rawValue
+      remoteSessionNames[contentID] = state.sessionName ?? ZmxSessionID.make(surfaceID: contentID)
+      if state.isDiscovered {
+        discoveredRemoteSessionIDs.insert(contentID)
+      }
+    }
   }
 
   /// Fires the layout-changed side effects the reducer cannot: persistence,
@@ -805,6 +1065,7 @@ final class WorktreeTerminalManager {
   /// projection. Called for every layout action, not only topology changes.
   func handleLayoutChanged(for worktreeID: Worktree.ID) {
     markLayoutDirty(worktreeID: worktreeID)
+    rememberRemoteSessionNames(in: worktreeID)
     hosts[worktreeID]?.reconcileContentLifecycle()
     // Zoom and selection changes flip which surfaces render; re-derive
     // occlusion and focus so hidden panes stop drawing.
@@ -839,10 +1100,15 @@ final class WorktreeTerminalManager {
   /// `executableURL`) gates the local kill so sessions from a previous
   /// under-budget launch still tear down.
   func killSession(for contentID: ContentID, worktreeID: Worktree.ID) async {
-    guard !consumeSpareSession(for: contentID) else { return }
+    if consumeSpareSession(for: contentID) {
+      remoteSessionNames.removeValue(forKey: contentID.rawValue)
+      discoveredRemoteSessionIDs.remove(contentID.rawValue)
+      return
+    }
     let killLocal = zmxClient.isBundled()
-    // A non-explicit end (clean remote exit, deliberate host-side detach)
-    // spares the host session; only explicit closes tear it down.
+    let localSessionID = ZmxSessionID.make(surfaceID: contentID.rawValue)
+    discoveredRemoteSessionIDs.remove(contentID.rawValue)
+    let remoteSessionID = remoteSessionNames.removeValue(forKey: contentID.rawValue) ?? localSessionID
     let localOnly = sessionsToKillLocalOnly.remove(contentID.rawValue) != nil
     let remoteHost =
       localOnly
@@ -858,9 +1124,10 @@ final class WorktreeTerminalManager {
       ]
     )
     await zmxClient.killSurfaceSessions(
-      sessionID: ZmxSessionID.make(surfaceID: contentID.rawValue),
+      sessionID: remoteSessionID,
       remoteHost: remoteHost,
-      killLocal: killLocal
+      killLocal: killLocal,
+      localSessionID: remoteHost == nil ? nil : localSessionID
     )
   }
 
@@ -1440,11 +1707,15 @@ final class WorktreeTerminalManager {
     let surfaceIDs =
       hosts[worktreeID]?.allSurfaceIDs
       ?? layoutState(for: worktreeID)?.layout.allContentIDs.map(\.rawValue) ?? []
+    rememberRemoteSessionNames(in: worktreeID)
+    let remoteSessionList = remoteHost.map { remoteSessions(for: $0, surfaceIDs: surfaceIDs) }
     paneWindows.closeAll(for: worktreeID)
     deleteLayoutSnapshot(worktreeID: worktreeID)
     if let host = hosts.removeValue(forKey: worktreeID) {
       // Watchers stop before the kill.
       host.tearDown()
+      stopRemoteSessionScanIfUnused(host.worktree.host)
+      stopLocalSessionScanIfUnused()
     }
     // Tombstone until the async kill lands, so reusing an id elsewhere can't be
     // provisioned into a session this teardown would then kill.
@@ -1464,11 +1735,12 @@ final class WorktreeTerminalManager {
     emitNotificationIndicatorCountIfNeeded()
     emitHasAnyTerminalSurfaceIfNeeded()
     refreshFocusedSurfaceBackground()
-    let remoteSessions = remoteHost.map { host in
-      surfaceIDs.map { (host: host, sessionID: ZmxSessionID.make(surfaceID: $0)) }
+    for surfaceID in surfaceIDs {
+      remoteSessionNames.removeValue(forKey: surfaceID)
+      discoveredRemoteSessionIDs.remove(surfaceID)
     }
     killZmxSessions(
-      surfaceIDs.map(ZmxSessionID.make(surfaceID:)), remoteSessions: remoteSessions ?? [],
+      surfaceIDs.map(ZmxSessionID.make(surfaceID:)), remoteSessions: remoteSessionList ?? [],
       clearingTombstones: surfaceIDs.map { ContentID(rawValue: $0) })
   }
 
@@ -1484,10 +1756,13 @@ final class WorktreeTerminalManager {
       removed.append((id, host))
     }
     let prunedSurfaceIDs = Set(removed.flatMap { _, host in host.allSurfaceIDs })
+    for (id, _) in removed {
+      rememberRemoteSessionNames(in: id)
+    }
     let prunedSessionIDs = removed.flatMap { _, host in
       host.allSurfaceIDs.map { ZmxSessionID.make(surfaceID: $0) }
     }
-    let prunedRemoteSessions = Self.remoteSessions(in: removed.map(\.1))
+    let prunedRemoteSessions = remoteSessions(in: removed.map(\.1))
     for (id, host) in removed {
       // Clear instead of resaving: archived / deleted worktrees should leave
       // no trace in `layouts.json`. The explicit delete bypasses the debounce
@@ -1516,6 +1791,14 @@ final class WorktreeTerminalManager {
       terminalLogger.info("Pruned \(removed.count) terminal host(s)")
     }
     hosts = hosts.filter { shouldKeep($0.key, $0.value) }
+    for surfaceID in prunedSurfaceIDs {
+      remoteSessionNames.removeValue(forKey: surfaceID)
+      discoveredRemoteSessionIDs.remove(surfaceID)
+    }
+    for (_, host) in removed {
+      stopRemoteSessionScanIfUnused(host.worktree.host)
+      stopLocalSessionScanIfUnused()
+    }
     cancelPendingIdleHooks(forSurfaceIDs: prunedSurfaceIDs)
     for (id, _) in removed { invalidateCaches(forPrunedWorktree: id) }
     emitNotificationIndicatorCountIfNeeded()
@@ -1530,12 +1813,25 @@ final class WorktreeTerminalManager {
   /// of each remote worktree. Unconditional on the persistence toggle: a host
   /// session may exist from an earlier launch, and the kill invocation is a
   /// silent no-op when nothing exists.
-  private static func remoteSessions(
+  private func remoteSessions(
     in hosts: [WorktreeContentHost]
   ) -> [(host: RemoteHost, sessionID: String)] {
     hosts.flatMap { host -> [(host: RemoteHost, sessionID: String)] in
       guard let remoteHost = host.worktree.host else { return [] }
-      return host.allSurfaceIDs.map { (remoteHost, ZmxSessionID.make(surfaceID: $0)) }
+      return remoteSessions(for: remoteHost, surfaceIDs: host.allSurfaceIDs)
+    }
+  }
+
+  private func remoteSessions(
+    for remoteHost: RemoteHost,
+    surfaceIDs: [UUID]
+  ) -> [(host: RemoteHost, sessionID: String)] {
+    surfaceIDs.compactMap { surfaceID in
+      guard !discoveredRemoteSessionIDs.contains(surfaceID) else { return nil }
+      return (
+        remoteHost,
+        remoteSessionNames[surfaceID] ?? ZmxSessionID.make(surfaceID: surfaceID)
+      )
     }
   }
 
@@ -1759,10 +2055,17 @@ final class WorktreeTerminalManager {
     let trackedByWorktree = hosts.flatMap { worktreeID, host in
       host.allSurfaceIDs.map { (worktreeID: worktreeID, surfaceID: $0) }
     }
+    for worktreeID in Set(trackedByWorktree.map(\.worktreeID)) {
+      rememberRemoteSessionNames(in: worktreeID)
+    }
     let trackedSessionIDs = Set(trackedByWorktree.map { ZmxSessionID.make(surfaceID: $0.surfaceID) })
     // "Quit and Terminate" promises nothing keeps running, so the host-side
     // sessions of remote worktrees are swept too (best-effort over SSH).
-    let trackedRemoteSessions = Self.remoteSessions(in: Array(hosts.values))
+    let trackedRemoteSessions = remoteSessions(in: Array(hosts.values))
+    for entry in trackedByWorktree {
+      remoteSessionNames.removeValue(forKey: entry.surfaceID)
+      discoveredRemoteSessionIDs.remove(entry.surfaceID)
+    }
     // Commit reported titles before teardown: the content is still live, so
     // this reaches the layout before the snapshot save empties the runtime. A
     // commit after `tearDown` would re-run layout lifecycle reconciliation,
