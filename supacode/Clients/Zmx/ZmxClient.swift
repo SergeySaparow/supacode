@@ -297,7 +297,7 @@ nonisolated enum ZmxSessionListParser {
     var clients: Int?
   }
 
-  static func parse(_ stdout: String) -> [Entry] {
+  static func parse(_ stdout: String, includingExternalNames: Bool = false) -> [Entry] {
     stdout
       .split(whereSeparator: \.isNewline)
       .compactMap { line -> Entry? in
@@ -318,7 +318,9 @@ nonisolated enum ZmxSessionListParser {
           let value = field[field.index(after: separator)...]
           values[key] = value
         }
-        guard let name = values["name"], name.hasPrefix(ZmxSessionID.prefix) else { return nil }
+        guard let name = values["name"], !name.isEmpty,
+          includingExternalNames || name.hasPrefix(ZmxSessionID.prefix)
+        else { return nil }
         // Absent `clients=` (err/status line) maps to nil = unknown, not zero.
         let clients = values["clients"].flatMap { Int($0) }
         return Entry(name: String(name), clients: clients)
@@ -342,7 +344,7 @@ nonisolated enum ZmxSocketBudget {
   static let sunPathLimit = 104
   static let safetyMargin = 2
 
-  /// `"supa-" + 36-char UUID` is always 41 bytes; hardcoded so `probe` doesn't
+  /// `supa-` + 36-char UUID is always 41 bytes; hardcoded so `probe` doesn't
   /// allocate a fresh UUID per call just to count the resulting string.
   static let sessionNameByteCount = ZmxSessionID.prefix.utf8.count + 36
 
@@ -396,7 +398,7 @@ nonisolated enum ZmxAttach {
   /// re-verifying upstream Ghostty's command-handling path.
   static func buildCommand(executablePath: String, sessionID: String, userCommand: String?) -> String {
     let quotedExe = shellQuote(executablePath)
-    let attach = "\(quotedExe) attach \(sessionID)"
+    let attach = "\(quotedExe) attach \(shellQuoteSessionName(sessionID))"
     guard let command = userCommand?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty else {
       return attach
     }
@@ -436,6 +438,21 @@ nonisolated enum ZmxAttach {
     return "'\(escaped)'"
   }
 
+  /// Keep the current readable command form for generated names, but quote
+  /// external names before they cross a shell boundary.
+  static func shellQuoteSessionName(_ value: String) -> String {
+    isShellSafeSessionName(value) ? value : shellQuote(value)
+  }
+
+  static func loginShellQuoteSessionName(_ value: String) -> String {
+    isShellSafeSessionName(value) ? value : SSHCommand.loginShellQuote(value)
+  }
+
+  private static func isShellSafeSessionName(_ value: String) -> Bool {
+    let safeCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_./:@+%="))
+    return !value.isEmpty && value.unicodeScalars.allSatisfy { safeCharacters.contains($0) }
+  }
+
   /// Everything the remote side needs to build a surface's connect and
   /// reconnect scripts. `userCommand` is the explicit command (nil for an
   /// interactive surface); `defaultCommand` is the cd-into-worktree login
@@ -445,11 +462,15 @@ nonisolated enum ZmxAttach {
   struct RemoteSurfaceLaunch {
     var host: RemoteHost
     var surfaceID: UUID
+    /// Exact host-side name for a discovered session. Nil uses the generated
+    /// name for a new Supacode-owned session.
+    var remoteSessionName: String?
     var userCommand: String?
     var defaultCommand: String?
     var hostPersistenceEnabled: Bool
 
-    var sessionID: String { ZmxSessionID.make(surfaceID: surfaceID) }
+    var localSessionID: String { ZmxSessionID.make(surfaceID: surfaceID) }
+    var sessionID: String { remoteSessionName ?? localSessionID }
 
     var export: String {
       "export SUPACODE_SURFACE_ID=\(ZmxAttach.shellQuote(surfaceID.uuidString)); "
@@ -507,10 +528,11 @@ nonisolated enum ZmxAttach {
     )
     let loop = SSHReconnectLoop.script(connect: connectLine, reconnect: reconnectLine)
     guard let localZmxExecutablePath else { return "/bin/sh -c " + shellQuote(loop) }
-    // The local and host-side sessions share the `supa-<surfaceID>` name.
+    // The local wrapper is always owned by this surface. A discovered tab may
+    // use a different exact name on the host.
     return buildCommand(
       executablePath: localZmxExecutablePath,
-      sessionID: launch.sessionID,
+      sessionID: launch.localSessionID,
       userCommand: loop
     )
   }
@@ -553,7 +575,7 @@ nonisolated enum ZmxAttach {
     return launch.export
       + brewPathPrefix
       + "if command -v zmx >/dev/null 2>&1; then "
-      + "zmx attach \(launch.sessionID) \(sessionCommand)\n"
+      + "zmx attach \(loginShellQuoteSessionName(launch.sessionID)) \(sessionCommand)\n"
       + "supa_rc=$?\n"
       + "[ \"$supa_rc\" -eq 0 ] && exit 0\n"
       + #"printf '\033[1;31m── zmx attach exited with status %s. "#
@@ -581,8 +603,8 @@ nonisolated enum ZmxAttach {
     return launch.export
       + brewPathPrefix
       + "if command -v zmx >/dev/null 2>&1; then "
-      + "if zmx list --short 2>/dev/null | grep -q '\(launch.sessionID)$'; then "
-      + "exec zmx attach \(launch.sessionID)\n"
+      + "if zmx list --short 2>/dev/null | \(sessionProbe(launch.sessionID)); then "
+      + "exec zmx attach \(loginShellQuoteSessionName(launch.sessionID))\n"
       + "fi\n"
       + sessionEndedNotice + "exit 0\n"
       + "fi\n"
@@ -599,7 +621,8 @@ nonisolated enum ZmxAttach {
     host: RemoteHost,
     sessionID: String
   ) -> (executableURL: URL, arguments: [String]) {
-    SSHCommand.invocation(
+    let quotedSessionID = loginShellQuoteSessionName(sessionID)
+    return SSHCommand.invocation(
       host: host,
       executable: "/bin/sh",
       // `|| exit 0`, not `&&`: a host without zmx must exit 0 (true no-op),
@@ -610,12 +633,19 @@ nonisolated enum ZmxAttach {
       arguments: [
         "-c",
         brewPathPrefix
-          + "command -v zmx >/dev/null 2>&1 || exit 0; zmx kill \(sessionID); "
-          + "! zmx list --short 2>/dev/null | grep -q '\(sessionID)$'",
+          + "command -v zmx >/dev/null 2>&1 || exit 0; zmx kill \(quotedSessionID); "
+          + "! zmx list --short 2>/dev/null | \(sessionProbe(sessionID))",
       ],
       workingDirectory: nil,
       extraOptions: SSHCommand.backgroundProbeOptions
     )
+  }
+
+  private static func sessionProbe(_ sessionID: String) -> String {
+    if isShellSafeSessionName(sessionID) {
+      return "grep -q '\(sessionID)$'"
+    }
+    return "grep -F -q -- \(SSHCommand.loginShellQuote(sessionID))"
   }
 
   /// Appends the well-known tool directories to `PATH` before every `zmx`
