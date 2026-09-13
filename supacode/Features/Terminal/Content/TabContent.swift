@@ -214,6 +214,7 @@ final class TerminalContent: TabContent {
       agents: state.agents,
       frozenGrid: surfaceView.captureFrozenGrid() ?? state.frozenGrid,
       sessionName: state.sessionName,
+      isDiscovered: state.isDiscovered,
       launch: state.launch
     )
   }

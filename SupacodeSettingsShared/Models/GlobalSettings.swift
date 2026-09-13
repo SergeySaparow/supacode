@@ -167,6 +167,8 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   /// When true, remote surfaces wrap their session in zmx on the host when
   /// the host has it installed, so the session survives disconnects.
   public var remoteSessionPersistenceEnabled: Bool
+  /// When true, remote zmx sessions found on a host are added as terminal tabs.
+  public var remoteSessionDiscoveryEnabled: Bool
   /// Where Supacode appears: Dock, menu bar, or both.
   public var appVisibility: AppVisibility
   /// Beta: hidden terminal tabs release their renderer after a few minutes of
@@ -224,6 +226,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     confirmCloseTab: .busy,
     terminateSessionsOnQuit: false,
     remoteSessionPersistenceEnabled: true,
+    remoteSessionDiscoveryEnabled: false,
     appVisibility: .dockAndMenuBar,
     chromeTextSize: .default
   )
@@ -269,6 +272,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     confirmCloseTab: ConfirmCloseTabMode = .busy,
     terminateSessionsOnQuit: Bool = false,
     remoteSessionPersistenceEnabled: Bool = true,
+    remoteSessionDiscoveryEnabled: Bool = false,
     appVisibility: AppVisibility = .dockAndMenuBar,
     terminalHibernationEnabled: Bool = true,
     chromeTextSize: ChromeTextSize = .default,
@@ -316,6 +320,7 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     self.confirmCloseTab = confirmCloseTab
     self.terminateSessionsOnQuit = terminateSessionsOnQuit
     self.remoteSessionPersistenceEnabled = remoteSessionPersistenceEnabled
+    self.remoteSessionDiscoveryEnabled = remoteSessionDiscoveryEnabled
     self.appVisibility = appVisibility
     self.terminalHibernationEnabled = terminalHibernationEnabled
     self.chromeTextSize = chromeTextSize
@@ -522,6 +527,9 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
     remoteSessionPersistenceEnabled =
       try container.decodeIfPresent(Bool.self, forKey: .remoteSessionPersistenceEnabled)
       ?? Self.default.remoteSessionPersistenceEnabled
+    remoteSessionDiscoveryEnabled =
+      try container.decodeIfPresent(Bool.self, forKey: .remoteSessionDiscoveryEnabled)
+      ?? Self.default.remoteSessionDiscoveryEnabled
     // Reject unrecognized values (and a mistyped key) from corrupted or
     // hand-edited settings files: a throw here resets the whole file to defaults.
     appVisibility =

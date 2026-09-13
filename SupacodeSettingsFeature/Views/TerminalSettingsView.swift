@@ -104,6 +104,13 @@ public struct TerminalSettingsView: View {
             """
           )
         }
+        Toggle(isOn: $store.remoteSessionDiscoveryEnabled) {
+          HStack(spacing: 6) {
+            Text("Discover ZMX sessions")
+            BetaBadge()
+          }
+          Text("Adds sessions created outside Supacode as terminal tabs.")
+        }
       }
       GhosttyConfigurationSection(
         store: store,

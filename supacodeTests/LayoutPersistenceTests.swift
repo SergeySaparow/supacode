@@ -226,11 +226,38 @@ struct LayoutPersistenceTests {
   @Test func persistsRemoteSessionIdentity() throws {
     let state = TerminalContentState(
       workingDirectory: nil,
-      sessionName: "agent shell;prod"
+      sessionName: "agent shell;prod",
+      isDiscovered: true
     )
     let data = try JSONEncoder().encode(state)
     let decoded = try JSONDecoder().decode(TerminalContentState.self, from: data)
     #expect(decoded.sessionName == "agent shell;prod")
+    #expect(decoded.isDiscovered)
+  }
+
+  @Test func layoutPersistenceKeepsRemoteSessionIdentity() {
+    let paneID = PaneID()
+    let tabID = TabID()
+    let contentID = ContentID()
+    var stored = layout(paneID: paneID, tabID: tabID, contentID: contentID)
+    stored.panes[id: paneID]?.tabs[id: tabID]?.content = ContentSnapshot(
+      id: contentID,
+      state: .terminal(
+        TerminalContentState(
+          workingDirectory: nil,
+          sessionName: "manual shell",
+          isDiscovered: true
+        )
+      )
+    )
+
+    let result = LayoutPersistence.record(for: stored, runtime: ContentRuntime())
+    guard case .terminal(let state) = result.layout.panes[id: paneID]?.tabs[id: tabID]?.content.state else {
+      Issue.record("Expected a terminal payload.")
+      return
+    }
+    #expect(state.sessionName == "manual shell")
+    #expect(state.isDiscovered)
   }
 
   @Test func overlaysLiveAgentRecordsPerContent() {

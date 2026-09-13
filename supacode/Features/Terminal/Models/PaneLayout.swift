@@ -54,6 +54,9 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
   /// Exact host-side zmx name for an external session. Fresh Supacode sessions
   /// derive their name from the content UUID and leave this nil.
   let sessionName: String?
+  /// True when this tab was imported from a zmx listing. The exact session name
+  /// is retained so an explicit close can terminate the imported session.
+  let isDiscovered: Bool
   /// Live-only launch override; the persistence path always strips it.
   let launch: LaunchOverride?
 
@@ -62,6 +65,7 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     case agents
     case frozenGrid
     case sessionName
+    case isDiscovered
   }
 
   init(
@@ -69,12 +73,14 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     agents: [TerminalLayoutSnapshot.SurfaceAgentRecord]? = nil,
     frozenGrid: FrozenGrid? = nil,
     sessionName: String? = nil,
+    isDiscovered: Bool = false,
     launch: LaunchOverride? = nil
   ) {
     self.workingDirectory = workingDirectory
     self.agents = agents
     self.frozenGrid = frozenGrid
     self.sessionName = sessionName
+    self.isDiscovered = isDiscovered
     self.launch = launch
   }
 
@@ -88,6 +94,7 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
       )) ?? nil
     frozenGrid = (try? container.decodeIfPresent(FrozenGrid.self, forKey: .frozenGrid)) ?? nil
     sessionName = try container.decodeIfPresent(String.self, forKey: .sessionName)
+    isDiscovered = try container.decodeIfPresent(Bool.self, forKey: .isDiscovered) ?? false
     launch = nil
   }
 
@@ -97,6 +104,9 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     try container.encodeIfPresent(agents, forKey: .agents)
     try container.encodeIfPresent(frozenGrid, forKey: .frozenGrid)
     try container.encodeIfPresent(sessionName, forKey: .sessionName)
+    if isDiscovered {
+      try container.encode(true, forKey: .isDiscovered)
+    }
   }
 }
 

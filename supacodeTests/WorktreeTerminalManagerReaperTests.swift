@@ -19,7 +19,8 @@ struct WorktreeTerminalManagerReaperTests {
         isBundled: { true },
         killSession: { id in killed.withValue { $0.append(id) } },
         killRemoteSession: { _, _ in },
-        listSessionsWithClients: { listing }
+        listSessionsWithClients: { listing },
+        listRemoteSessions: { _ in nil }
       )
     } operation: {
       WorktreeTerminalManager(runtime: GhosttyRuntime())
@@ -79,7 +80,8 @@ struct WorktreeTerminalManagerReaperTests {
         isBundled: { true },
         killSession: { id in killed.withValue { $0.append(id) } },
         killRemoteSession: { _, _ in },
-        listSessionsWithClients: { listing.value }
+        listSessionsWithClients: { listing.value },
+        listRemoteSessions: { _ in nil }
       )
     } operation: {
       WorktreeTerminalManager(runtime: GhosttyRuntime())

@@ -133,6 +133,14 @@ struct RemoteHostTests {
 }
 
 struct SSHCommandTests {
+  @Test func configurationInvocationUsesSSHConfigWithoutConnecting() {
+    let invocation = SSHCommand.configurationInvocation(
+      host: RemoteHost(alias: "strix", username: "saparow", port: 2222)
+    )
+    #expect(invocation.executableURL.path == SSHCommand.sshExecutablePath)
+    #expect(invocation.arguments == ["-G", "-p", "2222", "saparow@strix"])
+  }
+
   @Test func shellQuoteWrapsAndEscapesSingleQuotes() {
     #expect(SSHCommand.shellQuote("echo hi") == "'echo hi'")
     #expect(SSHCommand.shellQuote("echo 'hi'") == "'echo '\\''hi'\\'''")

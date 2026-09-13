@@ -35,6 +35,15 @@ struct ZmxClient: Sendable {
   /// a successful empty listing. A `clients` of nil marks a session whose count
   /// is unknown (err/status line), which the reaper must also spare.
   var listSessionsWithClients: @Sendable () async -> [ZmxSessionListParser.Entry]?
+  /// Returns every live local session, including names not created by Supacode.
+  /// Kept separate from `listSessionsWithClients` because the latter is used by
+  /// the orphan reaper and must remain prefix-filtered.
+  var listLocalSessions: @Sendable () async -> [ZmxSessionListParser.Entry]? = { [] }
+  /// Returns all live sessions on a remote host, or nil when the SSH probe fails.
+  var listRemoteSessions: @Sendable (_ host: RemoteHost) async -> [ZmxSessionListParser.Entry]?
+  /// Returns the effective `hostname|user|port` identity from `ssh -G`, or nil
+  /// when ssh cannot produce a usable configuration.
+  var resolveRemoteEndpoint: @Sendable (_ host: RemoteHost) async -> String? = { _ in nil }
 }
 
 /// Cached probe result so we log the bypass reason exactly once per process
@@ -243,6 +252,34 @@ extension ZmxClient {
         // exit); preserve it so the reaper never kills against a failed probe.
         guard let stdout = await runZmx(["ls"], captureStdout: true) else { return nil }
         return ZmxSessionListParser.parse(stdout)
+      },
+      listLocalSessions: {
+        guard let stdout = await runZmx(["ls"], captureStdout: true) else { return nil }
+        return ZmxSessionListParser.parse(stdout, includingExternalNames: true)
+      },
+      listRemoteSessions: { host in
+        guard
+          let stdout = await runProcess(
+            invocation: ZmxAttach.remoteListInvocation(host: host),
+            environment: nil,
+            timeout: remoteSubprocessTimeout,
+            commandLabel: "ssh \(host.sshDestination) zmx ls",
+            captureStdout: true
+          )
+        else { return nil }
+        return ZmxSessionListParser.parse(stdout, includingExternalNames: true)
+      },
+      resolveRemoteEndpoint: { host in
+        guard
+          let stdout = await runProcess(
+            invocation: SSHCommand.configurationInvocation(host: host),
+            environment: nil,
+            timeout: remoteSubprocessTimeout,
+            commandLabel: "ssh -G (host.sshDestination)",
+            captureStdout: true
+          )
+        else { return nil }
+        return ZmxRemoteEndpointIdentity.parse(stdout)
       }
     )
   }()
@@ -252,7 +289,10 @@ extension ZmxClient {
     isBundled: { false },
     killSession: { _ in },
     killRemoteSession: { _, _ in },
-    listSessionsWithClients: { [] }
+    listSessionsWithClients: { [] },
+    listLocalSessions: { [] },
+    listRemoteSessions: { _ in [] },
+    resolveRemoteEndpoint: { _ in nil }
   )
 }
 
@@ -260,9 +300,16 @@ extension ZmxClient {
   /// Tears down one surface's sessions host-first, then local: the remote kill's
   /// SSH reuses the ControlMaster held open by the local zmx session, so killing
   /// local first would strand the host session. Skips either side when unset.
+  /// `localSessionID` overrides the local wrapper name when the host session
+  /// uses an imported external name.
   /// Under cancellation the local kill is skipped instead of spawning a child
   /// that would be terminated on arrival; the caller owns any retry.
-  func killSurfaceSessions(sessionID: String, remoteHost: RemoteHost?, killLocal: Bool) async {
+  func killSurfaceSessions(
+    sessionID: String,
+    remoteHost: RemoteHost?,
+    killLocal: Bool,
+    localSessionID: String? = nil
+  ) async {
     if let remoteHost {
       await killRemoteSession(remoteHost, sessionID)
     }
@@ -271,7 +318,7 @@ extension ZmxClient {
       zmxLogger.debug("Cancelled before local kill of \(sessionID); caller owns the retry")
       return
     }
-    await killSession(sessionID)
+    await killSession(localSessionID ?? sessionID)
   }
 }
 
@@ -325,6 +372,93 @@ nonisolated enum ZmxSessionListParser {
         let clients = values["clients"].flatMap { Int($0) }
         return Entry(name: String(name), clients: clients)
       }
+  }
+}
+
+nonisolated enum ZmxSessionReconciliation {
+  struct OpenSession: Hashable, Sendable {
+    var endpoint: String
+    var name: String
+  }
+
+  struct Bookmark: Equatable, Sendable {
+    var name: String
+    var isDiscovered: Bool
+  }
+
+  struct Changes: Equatable, Sendable {
+    var added: [String]
+    var removed: [String]
+  }
+
+  static func diff(
+    remote: [ZmxSessionListParser.Entry],
+    local: [Bookmark]
+  ) -> Changes {
+    var remoteNames = Set<String>()
+    let uniqueRemoteNames = remote.compactMap { remoteNames.insert($0.name).inserted ? $0.name : nil }
+    let localNames = Set(local.map(\.name))
+    let remoteNameSet = Set(uniqueRemoteNames)
+    return Changes(
+      added: uniqueRemoteNames.filter { !localNames.contains($0) },
+      removed: local.filter { $0.isDiscovered && !remoteNameSet.contains($0.name) }.map(\.name)
+    )
+  }
+
+  /// Returns unique sessions absent from the global in-app set. `clients` is
+  /// deliberately ignored: an external ZMX client must not hide a session.
+  static func missingNames(
+    remote: [ZmxSessionListParser.Entry],
+    endpoint: String,
+    openSessions: [OpenSession]
+  ) -> [String] {
+    let open = Set(openSessions)
+    var seen = Set<String>()
+    return remote.compactMap { entry in
+      guard seen.insert(entry.name).inserted,
+        !open.contains(.init(endpoint: endpoint, name: entry.name))
+      else { return nil }
+      return entry.name
+    }
+  }
+
+  /// Local zmx also owns the reconnect wrapper for every remote surface. Those
+  /// names are not independent local sessions and must not be imported into a
+  /// local folder by the global scanner.
+  static func localDiscoveryEntries(
+    _ entries: [ZmxSessionListParser.Entry],
+    excludingRemoteWrappers: Set<String>
+  ) -> [ZmxSessionListParser.Entry] {
+    entries.filter { !excludingRemoteWrappers.contains($0.name) }
+  }
+}
+
+/// Parses the stable fields emitted by `ssh -G`. Host aliases and explicit
+/// user/port forms that resolve to the same values share a discovery scope.
+nonisolated enum ZmxRemoteEndpointIdentity {
+  static func fallback(_ host: RemoteHost) -> String {
+    "raw:\(host.authority)"
+  }
+
+  static func parse(_ output: String) -> String? {
+    var hostname: String?
+    var user: String?
+    var port: String?
+    for line in output.split(whereSeparator: \.isNewline) {
+      let fields = line.split(whereSeparator: \.isWhitespace)
+      guard fields.count >= 2 else { continue }
+      switch fields[0] {
+      case "hostname": hostname = String(fields[1]).lowercased()
+      case "user": user = String(fields[1])
+      case "port": port = String(fields[1])
+      default: continue
+      }
+    }
+    guard let hostname, !hostname.isEmpty,
+      let user, !user.isEmpty,
+      let port, Int(port) != nil
+    else { return nil }
+    return "\(hostname)|\(user)|\(port)"
   }
 }
 
@@ -636,6 +770,18 @@ nonisolated enum ZmxAttach {
           + "command -v zmx >/dev/null 2>&1 || exit 0; zmx kill \(quotedSessionID); "
           + "! zmx list --short 2>/dev/null | \(sessionProbe(sessionID))",
       ],
+      workingDirectory: nil,
+      extraOptions: SSHCommand.backgroundProbeOptions
+    )
+  }
+
+  static func remoteListInvocation(
+    host: RemoteHost
+  ) -> (executableURL: URL, arguments: [String]) {
+    SSHCommand.invocation(
+      host: host,
+      executable: "/bin/sh",
+      arguments: ["-c", brewPathPrefix + "zmx ls"],
       workingDirectory: nil,
       extraOptions: SSHCommand.backgroundProbeOptions
     )
