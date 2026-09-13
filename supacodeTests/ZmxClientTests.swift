@@ -217,14 +217,26 @@ struct ZmxSessionListParserTests {
     #expect(entries == [.init(name: "supa-abc", clients: 0)])
   }
 
-  @Test func filtersNonSupaSessions() {
+  @Test func keepsArbitrarySessionNames() {
     let entries = ZmxSessionListParser.parse(
       """
-      name=dev\tpid=1\tclients=2\tcreated=0
+      name=dev shell;$(id)\tpid=1\tclients=2\tcreated=0
       name=supa-abc\tpid=2\tclients=0\tcreated=0
-      """
+      """, includingExternalNames: true
     )
-    #expect(entries == [.init(name: "supa-abc", clients: 0)])
+    #expect(
+      entries == [
+        .init(name: "dev shell;$(id)", clients: 2),
+        .init(name: "supa-abc", clients: 0),
+      ]
+    )
+  }
+
+  @Test func localListingStillIgnoresExternalSessionNames() {
+    let entries = ZmxSessionListParser.parse(
+      "name=manual\tpid=1\tclients=0\tcreated=0\n"
+    )
+    #expect(entries.isEmpty)
   }
 
   @Test func dropsBlankAndMalformedLines() {
@@ -238,6 +250,7 @@ struct ZmxSessionListParserTests {
     )
     #expect(entries == [.init(name: "supa-keep", clients: 3)])
   }
+
 }
 
 @MainActor

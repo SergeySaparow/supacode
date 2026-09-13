@@ -51,6 +51,9 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
   let workingDirectory: String?
   let agents: [TerminalLayoutSnapshot.SurfaceAgentRecord]?
   let frozenGrid: FrozenGrid?
+  /// Exact host-side zmx name for an external session. Fresh Supacode sessions
+  /// derive their name from the content UUID and leave this nil.
+  let sessionName: String?
   /// Live-only launch override; the persistence path always strips it.
   let launch: LaunchOverride?
 
@@ -58,17 +61,20 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     case workingDirectory
     case agents
     case frozenGrid
+    case sessionName
   }
 
   init(
     workingDirectory: String?,
     agents: [TerminalLayoutSnapshot.SurfaceAgentRecord]? = nil,
     frozenGrid: FrozenGrid? = nil,
+    sessionName: String? = nil,
     launch: LaunchOverride? = nil
   ) {
     self.workingDirectory = workingDirectory
     self.agents = agents
     self.frozenGrid = frozenGrid
+    self.sessionName = sessionName
     self.launch = launch
   }
 
@@ -81,6 +87,7 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
         [TerminalLayoutSnapshot.SurfaceAgentRecord].self, forKey: .agents
       )) ?? nil
     frozenGrid = (try? container.decodeIfPresent(FrozenGrid.self, forKey: .frozenGrid)) ?? nil
+    sessionName = try container.decodeIfPresent(String.self, forKey: .sessionName)
     launch = nil
   }
 
@@ -89,6 +96,7 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     try container.encodeIfPresent(workingDirectory, forKey: .workingDirectory)
     try container.encodeIfPresent(agents, forKey: .agents)
     try container.encodeIfPresent(frozenGrid, forKey: .frozenGrid)
+    try container.encodeIfPresent(sessionName, forKey: .sessionName)
   }
 }
 
@@ -141,7 +149,7 @@ nonisolated enum ContentState: Equatable, Codable, Sendable {
 }
 
 /// Identity of a tab's content, stable across hibernation and relaunch; the
-/// zmx session name is derived from it for terminals.
+/// zmx session name is derived from it for terminals when no exact name is set.
 nonisolated struct ContentID: Hashable, Identifiable, Codable, Sendable {
   let rawValue: UUID
 
@@ -169,11 +177,6 @@ nonisolated struct ContentID: Hashable, Identifiable, Codable, Sendable {
 nonisolated struct ContentSnapshot: Equatable, Codable, Sendable {
   let id: ContentID
   let state: ContentState
-
-  private enum CodingKeys: String, CodingKey {
-    case id
-    case state
-  }
 
   var kind: ContentKind { state.kind }
 }

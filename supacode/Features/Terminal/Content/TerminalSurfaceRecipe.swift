@@ -30,7 +30,8 @@ nonisolated enum TerminalSurfaceRecipe {
     _ intent: LaunchIntent,
     for worktree: Worktree,
     surfaceID: UUID,
-    zmxExecutablePath: String?
+    zmxExecutablePath: String?,
+    remoteSessionName: String? = nil
   ) -> Launch {
     let command = intent.command
     let initialInput = intent.initialInput
@@ -49,10 +50,12 @@ nonisolated enum TerminalSurfaceRecipe {
       let remote = ZmxAttach.RemoteSurfaceLaunch(
         host: host,
         surfaceID: surfaceID,
+        remoteSessionName: remoteSessionName,
         userCommand: command,
         defaultCommand: remoteDefaultShellCommand(
           remotePath: worktree.workingDirectory.path(percentEncoded: false)),
-        hostPersistenceEnabled: settingsFile.global.remoteSessionPersistenceEnabled,
+        hostPersistenceEnabled:
+          settingsFile.global.remoteSessionPersistenceEnabled || remoteSessionName != nil,
       )
       return Launch(
         command: ZmxAttach.buildRemoteCommand(remote, localZmxExecutablePath: zmxExecutablePath),
@@ -63,7 +66,7 @@ nonisolated enum TerminalSurfaceRecipe {
     }
     let resolved = ZmxAttach.resolveLaunch(
       executablePath: zmxExecutablePath,
-      sessionID: ZmxSessionID.make(surfaceID: surfaceID),
+      sessionID: remoteSessionName ?? ZmxSessionID.make(surfaceID: surfaceID),
       command: command,
     )
     return Launch(
@@ -202,7 +205,8 @@ nonisolated enum TerminalSurfaceRecipe {
       ),
       for: seed.worktree,
       surfaceID: request.contentID.rawValue,
-      zmxExecutablePath: seed.zmxExecutablePath
+      zmxExecutablePath: seed.zmxExecutablePath,
+      remoteSessionName: seed.terminalState.sessionName
     )
     let context = context(for: request.origin)
     let inherited = inheritedConfig(from: seed.inheritedFrom, context: context)
@@ -339,7 +343,8 @@ struct TerminalContentBuilder {
           seedState = TerminalContentState(
             workingDirectory: currentState.workingDirectory,
             agents: currentState.agents,
-            frozenGrid: currentState.frozenGrid
+            frozenGrid: currentState.frozenGrid,
+            sessionName: currentState.sessionName
           )
         }
         let plan = TerminalSurfaceRecipe.plan(

@@ -223,6 +223,16 @@ struct LayoutPersistenceTests {
     #expect(decoded.workingDirectory == "/w")
   }
 
+  @Test func persistsRemoteSessionIdentity() throws {
+    let state = TerminalContentState(
+      workingDirectory: nil,
+      sessionName: "agent shell;prod"
+    )
+    let data = try JSONEncoder().encode(state)
+    let decoded = try JSONDecoder().decode(TerminalContentState.self, from: data)
+    #expect(decoded.sessionName == "agent shell;prod")
+  }
+
   @Test func overlaysLiveAgentRecordsPerContent() {
     let paneID = PaneID()
     let tabID = TabID()
