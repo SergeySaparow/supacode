@@ -367,23 +367,15 @@ struct SupacodeApp: App {
         ContentRuntime.liveValue.content(for: id)?.renderer as? GhosttySurfaceView
       },
       wireSurface: { [weak terminalManager] view, request in
-        guard let terminalManager,
-          let worktree = terminalManager.appStore?.withState({
-            $0.repositories.worktree(for: request.worktreeID)
-          })
-        else { return }
-        let host = terminalManager.host(for: worktree)
-        LayoutSurfaceConduit(
-          host: host,
-          runtime: ContentRuntime.liveValue,
-          handleUnexpectedZmxClose: { [weak terminalManager] view in
-            terminalManager?.handleUnexpectedZmxClose(view, worktreeID: worktree.id)
-          }
-        ).wire(view, contentID: request.contentID)
+        terminalManager?.wireSurface(
+          view, contentID: request.contentID, fallback: request.worktreeID)
       },
       environmentExtras: { [weak terminalManager] request in
         terminalManager?.hostIfExists(for: request.worktreeID)?
           .blockingScriptEnvironment(for: request.tabID) ?? [:]
+      },
+      owningWorktree: { [weak terminalManager] contentID in
+        terminalManager?.worktreeOwningContent(contentID)
       }
     ).factory()
   }

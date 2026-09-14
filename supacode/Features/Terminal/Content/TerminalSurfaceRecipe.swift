@@ -300,6 +300,7 @@ struct TerminalContentBuilder {
   var wireSurface: (GhosttySurfaceView, ContentRequest) -> Void
   /// Extra environment for a spawning surface (blocking-script markers).
   var environmentExtras: (ContentRequest) -> [String: String]
+  var owningWorktree: (ContentID) -> Worktree? = { _ in nil }
 
   func factory() -> LayoutContentFactory {
     LayoutContentFactory { request in
@@ -327,10 +328,13 @@ struct TerminalContentBuilder {
       makeSurface: { geometry, currentState, phase in
         // Re-resolve so a wake long after creation sees the current worktree;
         // the captured value only covers one that vanished mid-flight.
-        let worktree = lookUpWorktree(request.worktreeID) ?? capturedWorktree
+        let worktree =
+          owningWorktree(request.contentID) ?? lookUpWorktree(request.worktreeID)
+          ?? capturedWorktree
         // One-shot inheritance: a re-wake must not re-read the source's
         // current cwd/font or its split context.
         var effective = request
+        effective.worktreeID = worktree.id
         var seedState = currentState
         if phase == .rewake {
           effective.origin = .restored
