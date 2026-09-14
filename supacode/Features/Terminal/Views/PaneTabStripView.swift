@@ -10,8 +10,7 @@ nonisolated extension UTType {
   static let supacodeTabID = UTType(exportedAs: "sh.supacode.tabId")
 }
 
-/// The tab-drag pasteboard payload; a drop from another worktree's window
-/// simply fails the local lookup and is ignored.
+/// Tab identity shared by pane strips and sidebar worktree drop targets.
 nonisolated struct PaneTabDragPayload: Codable, Sendable, Transferable {
   let tabID: UUID
 

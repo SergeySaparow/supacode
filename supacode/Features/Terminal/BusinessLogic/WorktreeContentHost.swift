@@ -1117,6 +1117,20 @@ final class WorktreeContentHost {
     reconcileDormantWatchers()
   }
 
+  func transferSurfaceState(_ surfaceID: UUID, to destination: WorktreeContentHost) {
+    if let state = surfaceStates.removeValue(forKey: surfaceID) {
+      destination.surfaceStates[surfaceID] = state
+    }
+    destination.notifications.append(contentsOf: notifications.filter { $0.surfaceID == surfaceID })
+    notifications.removeAll { $0.surfaceID == surfaceID }
+    lastSweptContentIDs.remove(surfaceID)
+    lastDormantContentIDs.remove(surfaceID)
+    discardSurfaceBookkeeping(for: surfaceID)
+    reconcileDormantWatchers()
+    onNotificationIndicatorChanged?()
+    destination.onNotificationIndicatorChanged?()
+  }
+
   func cleanupSurfaceState(for surfaceID: UUID) {
     let hadUnseen = hasUnseenNotification(forSurfaceID: surfaceID)
     discardSurfaceBookkeeping(for: surfaceID)

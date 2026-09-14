@@ -710,6 +710,57 @@ final class WorktreeTerminalManager {
     hosts[worktreeID]
   }
 
+  func worktreeOwningContent(_ contentID: ContentID) -> Worktree? {
+    appStore?.withState { state in
+      guard
+        let owner = state.terminals.layouts.first(where: {
+          $0.layout.tab(containingContent: contentID) != nil
+        })
+      else { return nil }
+      return state.repositories.worktree(for: owner.id)
+    }
+  }
+
+  func wireSurface(_ view: GhosttySurfaceView, contentID: ContentID, fallback: Worktree.ID) {
+    guard
+      let worktree = worktreeOwningContent(contentID)
+        ?? appStore?.withState({ $0.repositories.worktree(for: fallback) })
+    else { return }
+    LayoutSurfaceConduit(
+      host: host(for: worktree),
+      runtime: ContentRuntime.liveValue,
+      handleUnexpectedZmxClose: { [weak self] view in
+        self?.handleUnexpectedZmxClose(view, worktreeID: worktree.id)
+      }
+    ).wire(view, contentID: contentID)
+  }
+
+  /// Moving a tab changes its owner, never its running process or endpoint.
+  func transferTab(_ tabID: TabID, to destinationID: Worktree.ID) -> Bool {
+    guard let appStore,
+      let source = appStore.withState({ state in
+        state.terminals.layouts.first { $0.layout.pane(containingTab: tabID) != nil }
+      }),
+      source.id != destinationID,
+      let tab = source.layout.pane(containingTab: tabID)?.tabs[id: tabID],
+      !tab.isLocked, source.alert == nil,
+      let sourceWorktree = appStore.withState({ $0.repositories.worktree(for: source.id) }),
+      let destination = appStore.withState({ $0.repositories.worktree(for: destinationID) }),
+      sourceWorktree.host == destination.host,
+      layoutState(for: destinationID)?.alert == nil
+    else { return false }
+    let destinationHost = host(for: destination)
+    sendTerminals(.transferTab(id: tabID, toWorktree: destinationID))
+    guard layoutState(for: destinationID)?.layout.pane(containingTab: tabID) != nil else {
+      return false
+    }
+    hosts[source.id]?.transferSurfaceState(tab.content.id.rawValue, to: destinationHost)
+    if let view = ContentRuntime.liveValue.renderer(for: tab.content.id) as? GhosttySurfaceView {
+      wireSurface(view, contentID: tab.content.id, fallback: destinationID)
+    }
+    return true
+  }
+
   /// The worktree's cross-feature host, created and wired on first use. Also
   /// ensures the layout exists in the store so commands have a target.
   func host(

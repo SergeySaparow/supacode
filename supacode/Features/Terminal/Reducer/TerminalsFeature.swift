@@ -63,6 +63,7 @@ struct TerminalsFeature {
 
   enum Action {
     case layouts(IdentifiedActionOf<LayoutFeature>)
+    case transferTab(id: TabID, toWorktree: Worktree.ID)
     /// Subscribes the memory-pressure source the hibernation policy reacts to.
     case task
     /// The migrated layouts file finished loading. Consistent records become
@@ -125,6 +126,28 @@ struct TerminalsFeature {
 
       case .layouts:
         return reconcileHibernation(&state)
+
+      case .transferTab(let tabID, let destinationID):
+        guard
+          var source = state.layouts.first(where: { $0.layout.pane(containingTab: tabID) != nil }),
+          var destination = state.layouts[id: destinationID],
+          LayoutFeature().transferTab(tabID, from: &source, to: &destination)
+        else { return .none }
+        state.layouts[id: source.id] = source
+        state.layouts[id: destinationID] = destination
+        // A grace timer captures its original worktree; re-arm it under the new owner.
+        state.hibernationArmedTabs.remove(tabID)
+        state.wakeRequestedTabs.remove(tabID)
+        return .concatenate(
+          .cancel(id: HibernationTimerID.tab(tabID)),
+          .merge(
+            reconcileHibernation(&state),
+            .run { [sourceID = source.id] _ in
+              await layoutChangeObserver.layoutChanged(sourceID)
+              await layoutChangeObserver.layoutChanged(destinationID)
+            }
+          )
+        )
 
       case .task:
         return .run { [memoryPressure] send in

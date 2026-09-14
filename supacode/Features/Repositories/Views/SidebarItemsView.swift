@@ -523,6 +523,13 @@ private struct SidebarItemBody: View {
     .disabled(isRepositoryRemoving && store.lifecycle != .idle)
     .contentShape(.dragPreview, .rect)
     .contentShape(.interaction, .rect)
+    .dropDestination(for: PaneTabDragPayload.self) { items, _ in
+      guard !isRepositoryRemoving, !lifecycle.isBusy, let item = items.first,
+        terminalManager.transferTab(TabID(rawValue: item.tabID), to: rowID)
+      else { return false }
+      parentStore.send(.selectWorktree(rowID, focusTerminal: true))
+      return true
+    }
     .onDragSessionUpdated { session in
       let draggedIDs = Set(session.draggedItemIDs(for: Worktree.ID.self))
       let active: Bool
