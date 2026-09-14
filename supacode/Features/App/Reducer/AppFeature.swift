@@ -421,24 +421,10 @@ struct AppFeature {
             }
           },
           .run { send in
-            // Reap crash / force-quit orphans, then resurrect agent badges
-            // from embedded records. Races with `.task` under `.merge`; the
-            // `repositoriesChanged` handler drains layout-seeded surfaces if restore wins.
             @Dependency(\.defaultAppStorage) var defaults
-            switch LayoutsFile.readPersisted(from: defaults) {
-            case .file(let layouts):
-              let staged = AgentPresenceFeature.stageRestore(from: layouts)
-              await terminalClient.reapOrphanSessions(layouts.allKnownSurfaceIDs)
-              await send(.agentPresence(.restoreFromSnapshot(staged: staged)))
-            case .absent:
-              // A fresh start owns nothing; stray supa-* sessions are orphans.
-              await terminalClient.reapOrphanSessions([])
-            case .unreadable:
-              // Never destroy on no signal: an unreadable store must not
-              // masquerade as empty, or the sweep would kill every detached
-              // session. Skip this launch; the next successful read reaps.
-              break
-            }
+            guard case let .file(layouts) = LayoutsFile.readPersisted(from: defaults) else { return }
+            let staged = AgentPresenceFeature.stageRestore(from: layouts)
+            await send(.agentPresence(.restoreFromSnapshot(staged: staged)))
           }
         )
 

@@ -1146,35 +1146,27 @@ final class WorktreeTerminalManager {
   func handleUnexpectedZmxClose(_ view: GhosttySurfaceView, worktreeID: Worktree.ID) {
     let surfaceID = view.id
     Task { @MainActor [weak self] in
-      let probe = await self?.zmxClient.listSessionsWithClients()
+      let probe = await self?.zmxClient.listLocalSessions()
       guard let self, let host = self.hosts[worktreeID], host.liveSurface(surfaceID) === view else { return }
       guard let tabID = host.tabID(containing: surfaceID) else { return }
       let sessionID = ZmxSessionID.make(surfaceID: surfaceID)
-      let session = probe?.first { $0.name == sessionID }
       guard let probe else {
         // Failed probe: never destroy on no signal; close but spare the session.
         self.sessionsToSpare.insert(surfaceID)
         self.sendLayout(worktreeID, .closeTab(id: tabID))
         return
       }
-      _ = probe
-      guard let session else {
+      guard probe.contains(where: { $0.name == sessionID }) else {
         // Session already dead; the close's kill is local cleanup. The end
         // was not user-initiated, so a remote host-side session survives.
         self.sessionsToKillLocalOnly.insert(surfaceID)
         self.sendLayout(worktreeID, .closeTab(id: tabID))
         return
       }
-      if session.clients == 0 {
-        // Reattachable: rebuild the same content at its persisted geometry.
-        self.commitReportedTitle(of: ContentID(rawValue: surfaceID), worktreeID: worktreeID)
-        ContentRuntime.liveValue.remove(ContentID(rawValue: surfaceID), tombstone: false)
-        self.sendLayout(worktreeID, .wakeTab(id: tabID))
-        return
-      }
-      // Another client attached (or unknown count): close without killing.
-      self.sessionsToSpare.insert(surfaceID)
-      self.sendLayout(worktreeID, .closeTab(id: tabID))
+      // Reattachable: rebuild the same content at its persisted geometry.
+      self.commitReportedTitle(of: ContentID(rawValue: surfaceID), worktreeID: worktreeID)
+      ContentRuntime.liveValue.remove(ContentID(rawValue: surfaceID), tombstone: false)
+      self.sendLayout(worktreeID, .wakeTab(id: tabID))
     }
   }
 
@@ -1759,10 +1751,6 @@ final class WorktreeTerminalManager {
     for (id, _) in removed {
       rememberRemoteSessionNames(in: id)
     }
-    let prunedSessionIDs = removed.flatMap { _, host in
-      host.allSurfaceIDs.map { ZmxSessionID.make(surfaceID: $0) }
-    }
-    let prunedRemoteSessions = remoteSessions(in: removed.map(\.1))
     for (id, host) in removed {
       // Clear instead of resaving: archived / deleted worktrees should leave
       // no trace in `layouts.json`. The explicit delete bypasses the debounce
@@ -1771,12 +1759,10 @@ final class WorktreeTerminalManager {
       paneWindows.closeAll(for: id)
       deleteLayoutSnapshot(worktreeID: id)
       let closedSurfaceIDs = Set(host.allSurfaceIDs)
-      // Watchers stop before the kill; the contents drop from the runtime.
+      // Watchers stop before the contents drop from the runtime.
       host.tearDown()
-      // Tombstone until the async kill lands, so reusing an id elsewhere can't be
-      // provisioned into a session this teardown would then kill.
       for surfaceID in closedSurfaceIDs {
-        ContentRuntime.liveValue.remove(ContentID(rawValue: surfaceID), tombstone: true)
+        ContentRuntime.liveValue.remove(ContentID(rawValue: surfaceID), tombstone: false)
       }
       // Global agent presence is keyed by surface id; retract the pruned
       // surfaces or archived / deleted agents linger in the presence UI.
@@ -1804,9 +1790,6 @@ final class WorktreeTerminalManager {
     emitNotificationIndicatorCountIfNeeded()
     emitHasAnyTerminalSurfaceIfNeeded()
     refreshFocusedSurfaceBackground()
-    killZmxSessions(
-      prunedSessionIDs, remoteSessions: prunedRemoteSessions,
-      clearingTombstones: prunedSurfaceIDs.map { ContentID(rawValue: $0) })
   }
 
   /// Host-side zmx sessions owned by the given states, one entry per surface
@@ -1826,9 +1809,8 @@ final class WorktreeTerminalManager {
     for remoteHost: RemoteHost,
     surfaceIDs: [UUID]
   ) -> [(host: RemoteHost, sessionID: String)] {
-    surfaceIDs.compactMap { surfaceID in
-      guard !discoveredRemoteSessionIDs.contains(surfaceID) else { return nil }
-      return (
+    surfaceIDs.map { surfaceID in
+      (
         remoteHost,
         remoteSessionNames[surfaceID] ?? ZmxSessionID.make(surfaceID: surfaceID)
       )
@@ -1911,15 +1893,8 @@ final class WorktreeTerminalManager {
     layoutFlushTasks.removeAll()
   }
 
-  /// Tears down persistent zmx sessions for worktrees that just left the keep
-  /// set. Parallel across surfaces; within one surface the remote kill precedes
-  /// the local one (see `ZmxClient.killSurfaceSessions`), so the bound is one
-  /// remote (15s) plus one local (5s) timeout regardless of N. Detached and
-  /// unbudgeted; a quit inside that window leaves local survivors to the
-  /// next-launch orphan reap (a host-side survivor has no reaper).
-  /// `clearingTombstones` ids stay blocked from re-provisioning until this kill
-  /// lands (so a reused id can't land in a session this then kills); confirmed on
-  /// every path so a tombstone never leaks.
+  /// Tears down sessions for an explicit worktree deletion. Parallel across
+  /// surfaces; within one surface the remote kill precedes the local one.
   private func killZmxSessions(
     _ sessionIDs: [String],
     remoteSessions: [(host: RemoteHost, sessionID: String)] = [],
@@ -1932,7 +1907,7 @@ final class WorktreeTerminalManager {
     let client = zmxClient
     analyticsClient.capture(
       "terminal_persistence_session_killed",
-      ["reason": "worktree_pruned", "count": sessionIDs.count, "remote_count": remoteSessions.count]
+      ["reason": "worktree_deleted", "count": sessionIDs.count, "remote_count": remoteSessions.count]
     )
     let plan = Self.killPlan(localSessionIDs: sessionIDs, remoteSessions: remoteSessions)
     Task.detached {
@@ -2046,10 +2021,8 @@ final class WorktreeTerminalManager {
     hosts.values.contains(where: \.hasInflightBlockingScripts)
   }
 
-  /// Tear down every tracked surface AND reap any orphans the daemon still
-  /// hosts. zmx is a long-lived per-user daemon that outlives our app quit,
-  /// so "Quit and Terminate" must explicitly sweep orphan sessions or they
-  /// would survive forever.
+  /// Tear down every tracked surface. Untracked zmx sessions are left alone;
+  /// deleting them is always an explicit user action.
   func terminateAllSessions(killBudget: Duration = WorktreeTerminalManager.quitKillBudget) async {
     // Captured before `tearDown`, which clears the hosts' surface tracking.
     let trackedByWorktree = hosts.flatMap { worktreeID, host in
@@ -2084,36 +2057,13 @@ final class WorktreeTerminalManager {
       ContentRuntime.liveValue.remove(contentID, tombstone: false)
     }
     emitHasAnyTerminalSurfaceIfNeeded()
-    // This instance's tracked local sessions are killed. A remote surface's
-    // local kill is gated behind its budgeted remote kill (see
-    // `ZmxClient.killSurfaceSessions`); when the budget expires first, the
-    // post-budget fallback retries it uncancelled. A kill that fails without
-    // cancellation (stuck daemon) is not retried; either way what remains
-    // locally is left to the next-launch orphan reap. The orphan subset (live and
-    // untracked) is attach-aware: spared when a client is attached or the count
-    // is unknown, so a concurrently-running instance keeps its sessions. Orphan
-    // reaping is therefore eventually consistent: the last instance to quit
-    // with no live clients sweeps what remains.
-    let liveSessions = await zmxClient.listSessionsWithClients()
-    let orphanSessions: [String]
-    if let liveSessions {
-      orphanSessions = liveSessions.filter { entry in
-        !trackedSessionIDs.contains(entry.name) && entry.clients == 0
-      }
-      .map(\.name)
-    } else {
-      // nil = UNKNOWN probe; still force-kill tracked, but skip the orphan sweep.
-      terminalLogger.info("Skipping quit-time orphan sweep: zmx session probe unavailable")
-      orphanSessions = []
-    }
-    let allSessions = Array(trackedSessionIDs.union(orphanSessions))
+    let allSessions = Array(trackedSessionIDs)
     guard !allSessions.isEmpty || !trackedRemoteSessions.isEmpty else { return }
     analyticsClient.capture(
       "terminal_persistence_session_killed",
       [
         "reason": "user_quit",
         "count": allSessions.count,
-        "orphan_count": orphanSessions.count,
         "remote_count": trackedRemoteSessions.count,
       ]
     )
@@ -2189,37 +2139,6 @@ final class WorktreeTerminalManager {
   /// local zmx cap (5s); 2s keeps worst-case quit around 8s, still under the
   /// remote ssh cap (15s).
   static let quitLocalFallbackBudget: Duration = .seconds(2)
-
-  /// Reaps `supa-*` sessions zmx hosts that no persisted layout claims;
-  /// catches orphans from crashes / force-quits. Attach-aware: a session with
-  /// a live client (another Supacode instance or a manual `zmx attach`) is
-  /// spared, and a failed probe reaps nothing.
-  func reapOrphanSessions(knownSurfaceIDs: Set<UUID>) async {
-    guard let liveSessions = await zmxClient.listSessionsWithClients() else {
-      // nil = UNKNOWN (probe failed / timed out); never reap on no signal.
-      terminalLogger.info("Skipping orphan reap: zmx session probe unavailable")
-      return
-    }
-    let knownSessionIDs = Set(knownSurfaceIDs.map(ZmxSessionID.make(surfaceID:)))
-    // Only reap orphans we positively know have zero attached clients; spare
-    // clients>0 (in use) and clients==nil (unknown count).
-    let orphans = liveSessions.filter { entry in
-      !knownSessionIDs.contains(entry.name) && entry.clients == 0
-    }
-    .map(\.name)
-    guard !orphans.isEmpty else { return }
-    terminalLogger.info("Reaping \(orphans.count) orphan zmx session(s)")
-    analyticsClient.capture(
-      "terminal_persistence_session_killed",
-      ["reason": "orphan_reaped", "count": orphans.count]
-    )
-    let client = zmxClient
-    await withTaskGroup(of: Void.self) { group in
-      for id in orphans {
-        group.addTask { await client.killSession(id) }
-      }
-    }
-  }
 
   func setNotificationsEnabled(_ enabled: Bool) {
     notificationsEnabled = enabled

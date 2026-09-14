@@ -167,7 +167,8 @@ public nonisolated struct GlobalSettings: Codable, Equatable, Sendable {
   /// When true, remote surfaces wrap their session in zmx on the host when
   /// the host has it installed, so the session survives disconnects.
   public var remoteSessionPersistenceEnabled: Bool
-  /// When true, remote zmx sessions found on a host are added as terminal tabs.
+  /// When true, local and remote zmx sessions found by scanning are added as
+  /// terminal tabs. Discovery never controls session deletion.
   public var remoteSessionDiscoveryEnabled: Bool
   /// Where Supacode appears: Dock, menu bar, or both.
   public var appVisibility: AppVisibility

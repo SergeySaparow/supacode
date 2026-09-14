@@ -19,9 +19,9 @@ struct ZmxRemoteSessionDiscoveryTests {
   @Test func reconciliationAddsMissingNamesAndRemovesOnlyDiscoveredOnes() {
     let changes = ZmxSessionReconciliation.diff(
       remote: [
-        .init(name: "existing", clients: 0),
-        .init(name: "new shell", clients: 1),
-        .init(name: "new shell", clients: 1),
+        .init(name: "existing"),
+        .init(name: "new shell"),
+        .init(name: "new shell"),
       ],
       local: [
         .init(name: "existing", isDiscovered: true),
@@ -36,8 +36,8 @@ struct ZmxRemoteSessionDiscoveryTests {
 
   @Test func discoveryUsesEndpointScopedGlobalOpenSet() {
     let remote = [
-      ZmxSessionListParser.Entry(name: "New_1", clients: 1),
-      ZmxSessionListParser.Entry(name: "New_2", clients: 0),
+      ZmxSessionListParser.Entry(name: "New_1"),
+      ZmxSessionListParser.Entry(name: "New_2"),
     ]
     let open = [
       ZmxSessionReconciliation.OpenSession(endpoint: "local", name: "New_1")
@@ -64,9 +64,9 @@ struct ZmxRemoteSessionDiscoveryTests {
       surfaceID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
     )
     let entries = [
-      ZmxSessionListParser.Entry(name: "New_1", clients: 1),
-      ZmxSessionListParser.Entry(name: remoteWrapper, clients: 1),
-      ZmxSessionListParser.Entry(name: "manual shell", clients: 0),
+      ZmxSessionListParser.Entry(name: "New_1"),
+      ZmxSessionListParser.Entry(name: remoteWrapper),
+      ZmxSessionListParser.Entry(name: "manual shell"),
     ]
 
     #expect(
@@ -74,8 +74,8 @@ struct ZmxRemoteSessionDiscoveryTests {
         entries,
         excludingRemoteWrappers: Set([remoteWrapper])
       ) == [
-        .init(name: "New_1", clients: 1),
-        .init(name: "manual shell", clients: 0),
+        .init(name: "New_1"),
+        .init(name: "manual shell"),
       ]
     )
   }

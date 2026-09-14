@@ -32,9 +32,9 @@ Point Supacode at a repository on a remote host over SSH and it manages that rep
 like a local one. Every git probe and the terminal share one multiplexed SSH connection, so you
 authenticate (or touch your security key) once. When the host has zmx, remote sessions survive
 dropped connections and laptop sleep: the connection retries and reattaches instead of
-restarting. Enable “Discover ZMX sessions” in Terminal settings to import sessions created
-outside Supacode as tabs in one folder per local or remote endpoint. Beta, with some local-only
-features reduced.
+restarting. Enable “Discover ZMX sessions” in Terminal settings to scan and show sessions created
+outside Supacode as tabs in one folder per local or remote endpoint. Discovery never deletes sessions;
+an explicit close is required. Beta, with some local-only features reduced.
 
 ### Folders and repositories
 
