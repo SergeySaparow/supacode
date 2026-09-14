@@ -28,16 +28,9 @@ struct ZmxClient: Sendable {
   var killSession: @Sendable (_ sessionID: String) async -> Void
   /// Best-effort kill of a host-side zmx session over SSH. No-op when the host
   /// lacks zmx. Bounded so an unreachable host can't hold the close path; an
-  /// unreachable host leaks the session (no host-side reaper yet).
+  /// unreachable host leaves the session untouched.
   var killRemoteSession: @Sendable (_ host: RemoteHost, _ sessionID: String) async -> Void
-  /// Returns each live Supacode session with its attached-client count, or nil
-  /// when the probe failed/timed out. nil means UNKNOWN (never reap); `[]` means
-  /// a successful empty listing. A `clients` of nil marks a session whose count
-  /// is unknown (err/status line), which the reaper must also spare.
-  var listSessionsWithClients: @Sendable () async -> [ZmxSessionListParser.Entry]?
   /// Returns every live local session, including names not created by Supacode.
-  /// Kept separate from `listSessionsWithClients` because the latter is used by
-  /// the orphan reaper and must remain prefix-filtered.
   var listLocalSessions: @Sendable () async -> [ZmxSessionListParser.Entry]? = { [] }
   /// Returns all live sessions on a remote host, or nil when the SSH probe fails.
   var listRemoteSessions: @Sendable (_ host: RemoteHost) async -> [ZmxSessionListParser.Entry]?
@@ -247,12 +240,6 @@ extension ZmxClient {
           captureStdout: false
         )
       },
-      listSessionsWithClients: {
-        // nil from runZmx is the UNKNOWN signal (spawn error / timeout / non-zero
-        // exit); preserve it so the reaper never kills against a failed probe.
-        guard let stdout = await runZmx(["ls"], captureStdout: true) else { return nil }
-        return ZmxSessionListParser.parse(stdout)
-      },
       listLocalSessions: {
         guard let stdout = await runZmx(["ls"], captureStdout: true) else { return nil }
         return ZmxSessionListParser.parse(stdout, includingExternalNames: true)
@@ -289,7 +276,6 @@ extension ZmxClient {
     isBundled: { false },
     killSession: { _ in },
     killRemoteSession: { _, _ in },
-    listSessionsWithClients: { [] },
     listLocalSessions: { [] },
     listRemoteSessions: { _ in [] },
     resolveRemoteEndpoint: { _ in nil }
@@ -335,13 +321,10 @@ extension DependencyValues {
 }
 
 /// Pure parser for zmx's full (`ls`, non-`--short`) tab-delimited listing.
-/// Each line is `[→ |  ]name=<name>\tk=v\t...`; a healthy session carries
-/// `clients=<n>`, an unreachable one carries `err=`/`status=` (no count).
+/// Each line is `[→ |  ]name=<name>\tk=v\t...`; metadata fields are ignored.
 nonisolated enum ZmxSessionListParser {
   struct Entry: Equatable, Sendable {
     var name: String
-    /// nil when the count is unknown (err/status line); the reaper spares these.
-    var clients: Int?
   }
 
   static func parse(_ stdout: String, includingExternalNames: Bool = false) -> [Entry] {
@@ -368,9 +351,7 @@ nonisolated enum ZmxSessionListParser {
         guard let name = values["name"], !name.isEmpty,
           includingExternalNames || name.hasPrefix(ZmxSessionID.prefix)
         else { return nil }
-        // Absent `clients=` (err/status line) maps to nil = unknown, not zero.
-        let clients = values["clients"].flatMap { Int($0) }
-        return Entry(name: String(name), clients: clients)
+        return Entry(name: String(name))
       }
   }
 }
@@ -405,8 +386,7 @@ nonisolated enum ZmxSessionReconciliation {
     )
   }
 
-  /// Returns unique sessions absent from the global in-app set. `clients` is
-  /// deliberately ignored: an external ZMX client must not hide a session.
+  /// Returns unique sessions absent from the global in-app set.
   static func missingNames(
     remote: [ZmxSessionListParser.Entry],
     endpoint: String,

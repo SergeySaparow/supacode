@@ -109,7 +109,10 @@ public struct TerminalSettingsView: View {
             Text("Discover ZMX sessions")
             BetaBadge()
           }
-          Text("Adds sessions created outside Supacode as terminal tabs.")
+          Text(
+            "Scans local and remote zmx sessions and shows them as terminal tabs. "
+              + "Turning this off stops scanning; it never deletes sessions."
+          )
         }
       }
       GhosttyConfigurationSection(

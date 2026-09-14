@@ -59,7 +59,6 @@ struct WorktreeTerminalManagerAckTests {
         isBundled: { false },
         killSession: { _ in },
         killRemoteSession: { host, session in killRemoteSession(host, session) },
-        listSessionsWithClients: { nil },
         listRemoteSessions: { _ in nil }
       )
     } operation: {
@@ -236,7 +235,6 @@ struct WorktreeTerminalManagerAckTests {
         isBundled: { true },
         killSession: { id in localKills.withValue { $0.append(id) } },
         killRemoteSession: { _, session in remoteKills.withValue { $0.append(session) } },
-        listSessionsWithClients: { nil },
         listRemoteSessions: { _ in nil }
       )
     } operation: {

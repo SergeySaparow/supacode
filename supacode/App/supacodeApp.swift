@@ -311,9 +311,6 @@ struct SupacodeApp: App {
         terminateAllSessions: {
           await terminalManager.terminateAllSessions()
         },
-        reapOrphanSessions: { knownSurfaceIDs in
-          await terminalManager.reapOrphanSessions(knownSurfaceIDs: knownSurfaceIDs)
-        },
         saveLayoutsWithAgents: { agentsBySurface in
           terminalManager.saveAllLayoutSnapshots(agentsBySurface: agentsBySurface)
         }
