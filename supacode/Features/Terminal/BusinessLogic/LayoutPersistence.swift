@@ -45,6 +45,9 @@ enum LayoutPersistence {
               workingDirectory: state.workingDirectory,
               agents: agents,
               frozenGrid: state.frozenGrid,
+              sessionName: state.sessionName,
+              isDiscovered: state.isDiscovered,
+              sessionOrigin: state.sessionOrigin,
               launch: state.launch
             )
           )
@@ -66,7 +69,10 @@ enum LayoutPersistence {
             TerminalContentState(
               workingDirectory: state.workingDirectory,
               agents: state.agents,
-              frozenGrid: state.frozenGrid
+              frozenGrid: state.frozenGrid,
+              sessionName: state.sessionName,
+              isDiscovered: state.isDiscovered,
+              sessionOrigin: state.sessionOrigin
             )
           )
         )

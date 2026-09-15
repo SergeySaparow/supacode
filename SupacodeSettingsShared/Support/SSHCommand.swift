@@ -220,6 +220,18 @@ public nonisolated enum SSHCommand {
     return (URL(fileURLWithPath: sshExecutablePath), sshArguments)
   }
 
+  /// Resolves the effective SSH configuration without opening a connection.
+  /// The output is parsed by ZMX discovery to group aliases that reach the same
+  /// host, user, and port.
+  public static func configurationInvocation(
+    host: RemoteHost
+  ) -> (executableURL: URL, arguments: [String]) {
+    (
+      URL(fileURLWithPath: sshExecutablePath),
+      ["-G"] + host.sshOptionArguments + [host.sshDestination]
+    )
+  }
+
   /// Full `ssh` line as a single string for a parent `/bin/sh -c` (Ghostty's
   /// surface command). The fixed option tokens are shell-safe and stay
   /// unquoted (so ssh still expands `~` / `%C` in `ControlPath`); the

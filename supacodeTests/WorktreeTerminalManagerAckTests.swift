@@ -32,6 +32,17 @@ struct WorktreeTerminalManagerAckTests {
     )
   }
 
+  private func makeRemoteWorktree() -> Worktree {
+    Worktree(
+      id: WorktreeID("remote://build-box/tmp/repo/wt-ack"),
+      name: "wt-ack",
+      detail: "detail",
+      workingDirectory: URL(filePath: "/tmp/repo/wt-ack"),
+      repositoryRootURL: URL(filePath: "/tmp/repo"),
+      host: RemoteHost(alias: "build-box")
+    )
+  }
+
   /// Manager wired to a live store whose factory provisions inert content, so
   /// creation flows run end to end without spawning surfaces.
   private func makeHarness(
@@ -48,7 +59,7 @@ struct WorktreeTerminalManagerAckTests {
         isBundled: { false },
         killSession: { _ in },
         killRemoteSession: { host, session in killRemoteSession(host, session) },
-        listSessionsWithClients: { nil }
+        listRemoteSessions: { _ in nil }
       )
     } operation: {
       WorktreeTerminalManager(runtime: GhosttyRuntime())
@@ -212,6 +223,115 @@ struct WorktreeTerminalManagerAckTests {
       ],
       focusedPaneID: paneID
     )
+  }
+
+  @Test(.dependencies, arguments: [false, true])
+  func movedSessionClosesOnOriginalHostAfterOwnerLayoutIsRemoved(localSource: Bool) async {
+    let kills = LockIsolated<[(RemoteHost, String)]>([])
+    let harness = makeHarness { host, name in kills.withValue { $0.append((host, name)) } }
+    let destination = makeRemoteWorktree()
+    let source =
+      localSource
+      ? makeWorktree()
+      : Worktree(
+        id: WorktreeID("source"), name: "source", detail: "",
+        workingDirectory: URL(filePath: "/source"), repositoryRootURL: URL(filePath: "/source"),
+        host: RemoteHost(alias: "original-server"))
+    let contentID = UUID()
+    var layout = singleTabLayout(contentID: contentID)
+    let paneID = layout.panes[0].id
+    let tabID = layout.panes[0].tabs[0].id
+    layout.panes[id: paneID]?.tabs[id: tabID]?.content = ContentSnapshot(
+      id: ContentID(rawValue: contentID),
+      state: .terminal(
+        TerminalContentState(
+          workingDirectory: nil, sessionName: "hermes", sessionOrigin: TerminalSessionOrigin(source))))
+    harness.store.send(
+      .terminals(
+        .layoutsHydrated(
+          LayoutsFile(worktrees: [
+            destination.id.rawValue: LayoutRecord(layout: layout)
+          ]))))
+    _ = harness.manager.host(for: destination)
+    harness.manager.handleLayoutChanged(for: destination.id)
+    harness.store.send(.terminals(.detachLayout(worktreeID: destination.id)))
+    await harness.manager.killSession(for: ContentID(rawValue: contentID), worktreeID: destination.id)
+    #expect(kills.value.count == (localSource ? 0 : 1))
+    if !localSource {
+      #expect(kills.value.first?.0 == source.host)
+      #expect(kills.value.first?.1 == "hermes")
+    }
+  }
+
+  @Test func sameSessionNameOnTwoHostsKeepsBothKillTargets() {
+    let first = RemoteHost(alias: "first")
+    let second = RemoteHost(alias: "second")
+    let plan = WorktreeTerminalManager.killPlan(
+      localSessionIDs: [],
+      remoteSessions: [
+        (first, "hermes"), (second, "hermes"), (first, "hermes"),
+      ])
+    #expect(plan.count == 2)
+    #expect(Set(plan.compactMap(\.host)) == [first, second])
+  }
+
+  @Test(.dependencies) func closingDiscoveredRemoteSessionKillsItsHostSession() async {
+    let remoteKills = LockIsolated<[String]>([])
+    let localKills = LockIsolated<[String]>([])
+    let worktree = makeRemoteWorktree()
+    let manager = withDependencies {
+      $0.zmxClient = ZmxClient(
+        executableURL: { nil },
+        isBundled: { true },
+        killSession: { id in localKills.withValue { $0.append(id) } },
+        killRemoteSession: { _, session in remoteKills.withValue { $0.append(session) } },
+        listRemoteSessions: { _ in nil }
+      )
+    } operation: {
+      WorktreeTerminalManager(runtime: GhosttyRuntime())
+    }
+    let store = Store(
+      initialState: AppFeature.State(
+        repositories: RepositoriesFeature.State(),
+        settings: SettingsFeature.State()
+      )
+    ) {
+      AppFeature()
+    } withDependencies: {
+      $0.contentRuntime = ContentRuntime()
+      $0[LayoutContentFactory.self] = LayoutContentFactory { request in
+        InertTabContent(id: request.contentID, state: request.content)
+      }
+      $0[ContentSessionKiller.self] = ContentSessionKiller(kill: { _, _ in })
+    }
+    manager.appStore = store
+
+    let contentID = UUID()
+    var layout = singleTabLayout(contentID: contentID)
+    let paneID = try! #require(layout.panes.first?.id)
+    let tabID = try! #require(layout.panes.first?.tabs.first?.id)
+    layout.panes[id: paneID]?.tabs[id: tabID]?.content = ContentSnapshot(
+      id: ContentID(rawValue: contentID),
+      state: .terminal(
+        TerminalContentState(workingDirectory: nil, sessionName: "5555", isDiscovered: true)
+      )
+    )
+    let record = LayoutRecord(layout: layout)
+    store.send(
+      .terminals(
+        .layoutsHydrated(LayoutsFile(worktrees: [worktree.id.rawValue: record]))
+      )
+    )
+    _ = manager.host(for: worktree)
+    manager.handleLayoutChanged(for: worktree.id)
+
+    await manager.killSession(
+      for: ContentID(rawValue: contentID),
+      worktreeID: worktree.id
+    )
+
+    #expect(remoteKills.value == ["5555"])
+    #expect(localKills.value == [ZmxSessionID.make(surfaceID: contentID)])
   }
 
   @Test(.dependencies) func removingADeletedWorktreesLayoutWorksWithoutAHost() async throws {

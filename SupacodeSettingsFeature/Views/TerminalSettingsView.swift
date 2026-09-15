@@ -104,6 +104,16 @@ public struct TerminalSettingsView: View {
             """
           )
         }
+        Toggle(isOn: $store.remoteSessionDiscoveryEnabled) {
+          HStack(spacing: 6) {
+            Text("Discover ZMX sessions")
+            BetaBadge()
+          }
+          Text(
+            "Scans local and remote zmx sessions and shows them as terminal tabs. "
+              + "Turning this off stops scanning; it never deletes sessions."
+          )
+        }
       }
       GhosttyConfigurationSection(
         store: store,

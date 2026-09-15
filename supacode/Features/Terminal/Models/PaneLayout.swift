@@ -46,11 +46,39 @@ nonisolated struct LaunchOverride: Equatable, Codable, Sendable {
   }
 }
 
+/// Session connection and fallback paths, independent of its sidebar folder.
+/// A non-nil origin with a nil host explicitly identifies a local session.
+nonisolated struct TerminalSessionOrigin: Equatable, Codable, Sendable {
+  let host: RemoteHost?
+  let workingDirectory: URL
+  let repositoryRootURL: URL
+
+  init(_ worktree: Worktree) {
+    host = worktree.host
+    workingDirectory = worktree.workingDirectory
+    repositoryRootURL = worktree.repositoryRootURL
+  }
+
+  func applying(to owner: Worktree) -> Worktree {
+    Worktree(
+      id: owner.id, kind: owner.kind, name: owner.name, detail: owner.detail,
+      workingDirectory: workingDirectory, repositoryRootURL: repositoryRootURL, host: host
+    )
+  }
+}
+
 /// Terminal-specific persisted state; the generic layout never sees grids.
 nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
   let workingDirectory: String?
   let agents: [TerminalLayoutSnapshot.SurfaceAgentRecord]?
   let frozenGrid: FrozenGrid?
+  /// Exact host-side zmx name for an external session. Fresh Supacode sessions
+  /// derive their name from the content UUID and leave this nil.
+  let sessionName: String?
+  /// True when this tab was imported from a zmx listing. The exact session name
+  /// is retained so an explicit close can terminate the imported session.
+  let isDiscovered: Bool
+  var sessionOrigin: TerminalSessionOrigin?
   /// Live-only launch override; the persistence path always strips it.
   let launch: LaunchOverride?
 
@@ -58,17 +86,26 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     case workingDirectory
     case agents
     case frozenGrid
+    case sessionName
+    case isDiscovered
+    case sessionOrigin
   }
 
   init(
     workingDirectory: String?,
     agents: [TerminalLayoutSnapshot.SurfaceAgentRecord]? = nil,
     frozenGrid: FrozenGrid? = nil,
+    sessionName: String? = nil,
+    isDiscovered: Bool = false,
+    sessionOrigin: TerminalSessionOrigin? = nil,
     launch: LaunchOverride? = nil
   ) {
     self.workingDirectory = workingDirectory
     self.agents = agents
     self.frozenGrid = frozenGrid
+    self.sessionName = sessionName
+    self.isDiscovered = isDiscovered
+    self.sessionOrigin = sessionOrigin
     self.launch = launch
   }
 
@@ -81,6 +118,9 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
         [TerminalLayoutSnapshot.SurfaceAgentRecord].self, forKey: .agents
       )) ?? nil
     frozenGrid = (try? container.decodeIfPresent(FrozenGrid.self, forKey: .frozenGrid)) ?? nil
+    sessionName = try container.decodeIfPresent(String.self, forKey: .sessionName)
+    isDiscovered = try container.decodeIfPresent(Bool.self, forKey: .isDiscovered) ?? false
+    sessionOrigin = try container.decodeIfPresent(TerminalSessionOrigin.self, forKey: .sessionOrigin)
     launch = nil
   }
 
@@ -89,6 +129,11 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     try container.encodeIfPresent(workingDirectory, forKey: .workingDirectory)
     try container.encodeIfPresent(agents, forKey: .agents)
     try container.encodeIfPresent(frozenGrid, forKey: .frozenGrid)
+    try container.encodeIfPresent(sessionName, forKey: .sessionName)
+    try container.encodeIfPresent(sessionOrigin, forKey: .sessionOrigin)
+    if isDiscovered {
+      try container.encode(true, forKey: .isDiscovered)
+    }
   }
 }
 
@@ -141,7 +186,7 @@ nonisolated enum ContentState: Equatable, Codable, Sendable {
 }
 
 /// Identity of a tab's content, stable across hibernation and relaunch; the
-/// zmx session name is derived from it for terminals.
+/// zmx session name is derived from it for terminals when no exact name is set.
 nonisolated struct ContentID: Hashable, Identifiable, Codable, Sendable {
   let rawValue: UUID
 
@@ -169,11 +214,6 @@ nonisolated struct ContentID: Hashable, Identifiable, Codable, Sendable {
 nonisolated struct ContentSnapshot: Equatable, Codable, Sendable {
   let id: ContentID
   let state: ContentState
-
-  private enum CodingKeys: String, CodingKey {
-    case id
-    case state
-  }
 
   var kind: ContentKind { state.kind }
 }

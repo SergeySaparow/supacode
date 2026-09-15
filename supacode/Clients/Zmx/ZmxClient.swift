@@ -28,13 +28,15 @@ struct ZmxClient: Sendable {
   var killSession: @Sendable (_ sessionID: String) async -> Void
   /// Best-effort kill of a host-side zmx session over SSH. No-op when the host
   /// lacks zmx. Bounded so an unreachable host can't hold the close path; an
-  /// unreachable host leaks the session (no host-side reaper yet).
+  /// unreachable host leaves the session untouched.
   var killRemoteSession: @Sendable (_ host: RemoteHost, _ sessionID: String) async -> Void
-  /// Returns each live Supacode session with its attached-client count, or nil
-  /// when the probe failed/timed out. nil means UNKNOWN (never reap); `[]` means
-  /// a successful empty listing. A `clients` of nil marks a session whose count
-  /// is unknown (err/status line), which the reaper must also spare.
-  var listSessionsWithClients: @Sendable () async -> [ZmxSessionListParser.Entry]?
+  /// Returns every live local session, including names not created by Supacode.
+  var listLocalSessions: @Sendable () async -> [ZmxSessionListParser.Entry]? = { [] }
+  /// Returns all live sessions on a remote host, or nil when the SSH probe fails.
+  var listRemoteSessions: @Sendable (_ host: RemoteHost) async -> [ZmxSessionListParser.Entry]?
+  /// Returns the effective `hostname|user|port` identity from `ssh -G`, or nil
+  /// when ssh cannot produce a usable configuration.
+  var resolveRemoteEndpoint: @Sendable (_ host: RemoteHost) async -> String? = { _ in nil }
 }
 
 /// Cached probe result so we log the bypass reason exactly once per process
@@ -238,11 +240,33 @@ extension ZmxClient {
           captureStdout: false
         )
       },
-      listSessionsWithClients: {
-        // nil from runZmx is the UNKNOWN signal (spawn error / timeout / non-zero
-        // exit); preserve it so the reaper never kills against a failed probe.
+      listLocalSessions: {
         guard let stdout = await runZmx(["ls"], captureStdout: true) else { return nil }
-        return ZmxSessionListParser.parse(stdout)
+        return ZmxSessionListParser.parse(stdout, includingExternalNames: true)
+      },
+      listRemoteSessions: { host in
+        guard
+          let stdout = await runProcess(
+            invocation: ZmxAttach.remoteListInvocation(host: host),
+            environment: nil,
+            timeout: remoteSubprocessTimeout,
+            commandLabel: "ssh \(host.sshDestination) zmx ls",
+            captureStdout: true
+          )
+        else { return nil }
+        return ZmxSessionListParser.parse(stdout, includingExternalNames: true)
+      },
+      resolveRemoteEndpoint: { host in
+        guard
+          let stdout = await runProcess(
+            invocation: SSHCommand.configurationInvocation(host: host),
+            environment: nil,
+            timeout: remoteSubprocessTimeout,
+            commandLabel: "ssh -G (host.sshDestination)",
+            captureStdout: true
+          )
+        else { return nil }
+        return ZmxRemoteEndpointIdentity.parse(stdout)
       }
     )
   }()
@@ -252,7 +276,9 @@ extension ZmxClient {
     isBundled: { false },
     killSession: { _ in },
     killRemoteSession: { _, _ in },
-    listSessionsWithClients: { [] }
+    listLocalSessions: { [] },
+    listRemoteSessions: { _ in [] },
+    resolveRemoteEndpoint: { _ in nil }
   )
 }
 
@@ -260,9 +286,16 @@ extension ZmxClient {
   /// Tears down one surface's sessions host-first, then local: the remote kill's
   /// SSH reuses the ControlMaster held open by the local zmx session, so killing
   /// local first would strand the host session. Skips either side when unset.
+  /// `localSessionID` overrides the local wrapper name when the host session
+  /// uses an imported external name.
   /// Under cancellation the local kill is skipped instead of spawning a child
   /// that would be terminated on arrival; the caller owns any retry.
-  func killSurfaceSessions(sessionID: String, remoteHost: RemoteHost?, killLocal: Bool) async {
+  func killSurfaceSessions(
+    sessionID: String,
+    remoteHost: RemoteHost?,
+    killLocal: Bool,
+    localSessionID: String? = nil
+  ) async {
     if let remoteHost {
       await killRemoteSession(remoteHost, sessionID)
     }
@@ -271,7 +304,7 @@ extension ZmxClient {
       zmxLogger.debug("Cancelled before local kill of \(sessionID); caller owns the retry")
       return
     }
-    await killSession(sessionID)
+    await killSession(localSessionID ?? sessionID)
   }
 }
 
@@ -288,16 +321,13 @@ extension DependencyValues {
 }
 
 /// Pure parser for zmx's full (`ls`, non-`--short`) tab-delimited listing.
-/// Each line is `[→ |  ]name=<name>\tk=v\t...`; a healthy session carries
-/// `clients=<n>`, an unreachable one carries `err=`/`status=` (no count).
+/// Each line is `[→ |  ]name=<name>\tk=v\t...`; metadata fields are ignored.
 nonisolated enum ZmxSessionListParser {
   struct Entry: Equatable, Sendable {
     var name: String
-    /// nil when the count is unknown (err/status line); the reaper spares these.
-    var clients: Int?
   }
 
-  static func parse(_ stdout: String) -> [Entry] {
+  static func parse(_ stdout: String, includingExternalNames: Bool = false) -> [Entry] {
     stdout
       .split(whereSeparator: \.isNewline)
       .compactMap { line -> Entry? in
@@ -318,11 +348,97 @@ nonisolated enum ZmxSessionListParser {
           let value = field[field.index(after: separator)...]
           values[key] = value
         }
-        guard let name = values["name"], name.hasPrefix(ZmxSessionID.prefix) else { return nil }
-        // Absent `clients=` (err/status line) maps to nil = unknown, not zero.
-        let clients = values["clients"].flatMap { Int($0) }
-        return Entry(name: String(name), clients: clients)
+        guard let name = values["name"], !name.isEmpty,
+          includingExternalNames || name.hasPrefix(ZmxSessionID.prefix)
+        else { return nil }
+        return Entry(name: String(name))
       }
+  }
+}
+
+nonisolated enum ZmxSessionReconciliation {
+  struct OpenSession: Hashable, Sendable {
+    var endpoint: String
+    var name: String
+  }
+
+  struct Bookmark: Equatable, Sendable {
+    var name: String
+    var isDiscovered: Bool
+  }
+
+  struct Changes: Equatable, Sendable {
+    var added: [String]
+    var removed: [String]
+  }
+
+  static func diff(
+    remote: [ZmxSessionListParser.Entry],
+    local: [Bookmark]
+  ) -> Changes {
+    var remoteNames = Set<String>()
+    let uniqueRemoteNames = remote.compactMap { remoteNames.insert($0.name).inserted ? $0.name : nil }
+    let localNames = Set(local.map(\.name))
+    let remoteNameSet = Set(uniqueRemoteNames)
+    return Changes(
+      added: uniqueRemoteNames.filter { !localNames.contains($0) },
+      removed: local.filter { $0.isDiscovered && !remoteNameSet.contains($0.name) }.map(\.name)
+    )
+  }
+
+  /// Returns unique sessions absent from the global in-app set.
+  static func missingNames(
+    remote: [ZmxSessionListParser.Entry],
+    endpoint: String,
+    openSessions: [OpenSession]
+  ) -> [String] {
+    let open = Set(openSessions)
+    var seen = Set<String>()
+    return remote.compactMap { entry in
+      guard seen.insert(entry.name).inserted,
+        !open.contains(.init(endpoint: endpoint, name: entry.name))
+      else { return nil }
+      return entry.name
+    }
+  }
+
+  /// Local zmx also owns the reconnect wrapper for every remote surface. Those
+  /// names are not independent local sessions and must not be imported into a
+  /// local folder by the global scanner.
+  static func localDiscoveryEntries(
+    _ entries: [ZmxSessionListParser.Entry],
+    excludingRemoteWrappers: Set<String>
+  ) -> [ZmxSessionListParser.Entry] {
+    entries.filter { !excludingRemoteWrappers.contains($0.name) }
+  }
+}
+
+/// Parses the stable fields emitted by `ssh -G`. Host aliases and explicit
+/// user/port forms that resolve to the same values share a discovery scope.
+nonisolated enum ZmxRemoteEndpointIdentity {
+  static func fallback(_ host: RemoteHost) -> String {
+    "raw:\(host.authority)"
+  }
+
+  static func parse(_ output: String) -> String? {
+    var hostname: String?
+    var user: String?
+    var port: String?
+    for line in output.split(whereSeparator: \.isNewline) {
+      let fields = line.split(whereSeparator: \.isWhitespace)
+      guard fields.count >= 2 else { continue }
+      switch fields[0] {
+      case "hostname": hostname = String(fields[1]).lowercased()
+      case "user": user = String(fields[1])
+      case "port": port = String(fields[1])
+      default: continue
+      }
+    }
+    guard let hostname, !hostname.isEmpty,
+      let user, !user.isEmpty,
+      let port, Int(port) != nil
+    else { return nil }
+    return "\(hostname)|\(user)|\(port)"
   }
 }
 
@@ -342,7 +458,7 @@ nonisolated enum ZmxSocketBudget {
   static let sunPathLimit = 104
   static let safetyMargin = 2
 
-  /// `"supa-" + 36-char UUID` is always 41 bytes; hardcoded so `probe` doesn't
+  /// `supa-` + 36-char UUID is always 41 bytes; hardcoded so `probe` doesn't
   /// allocate a fresh UUID per call just to count the resulting string.
   static let sessionNameByteCount = ZmxSessionID.prefix.utf8.count + 36
 
@@ -396,7 +512,7 @@ nonisolated enum ZmxAttach {
   /// re-verifying upstream Ghostty's command-handling path.
   static func buildCommand(executablePath: String, sessionID: String, userCommand: String?) -> String {
     let quotedExe = shellQuote(executablePath)
-    let attach = "\(quotedExe) attach \(sessionID)"
+    let attach = "\(quotedExe) attach \(shellQuoteSessionName(sessionID))"
     guard let command = userCommand?.trimmingCharacters(in: .whitespacesAndNewlines), !command.isEmpty else {
       return attach
     }
@@ -436,6 +552,21 @@ nonisolated enum ZmxAttach {
     return "'\(escaped)'"
   }
 
+  /// Keep the current readable command form for generated names, but quote
+  /// external names before they cross a shell boundary.
+  static func shellQuoteSessionName(_ value: String) -> String {
+    isShellSafeSessionName(value) ? value : shellQuote(value)
+  }
+
+  static func loginShellQuoteSessionName(_ value: String) -> String {
+    isShellSafeSessionName(value) ? value : SSHCommand.loginShellQuote(value)
+  }
+
+  private static func isShellSafeSessionName(_ value: String) -> Bool {
+    let safeCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_./:@+%="))
+    return !value.isEmpty && value.unicodeScalars.allSatisfy { safeCharacters.contains($0) }
+  }
+
   /// Everything the remote side needs to build a surface's connect and
   /// reconnect scripts. `userCommand` is the explicit command (nil for an
   /// interactive surface); `defaultCommand` is the cd-into-worktree login
@@ -445,11 +576,15 @@ nonisolated enum ZmxAttach {
   struct RemoteSurfaceLaunch {
     var host: RemoteHost
     var surfaceID: UUID
+    /// Exact host-side name for a discovered session. Nil uses the generated
+    /// name for a new Supacode-owned session.
+    var remoteSessionName: String?
     var userCommand: String?
     var defaultCommand: String?
     var hostPersistenceEnabled: Bool
 
-    var sessionID: String { ZmxSessionID.make(surfaceID: surfaceID) }
+    var localSessionID: String { ZmxSessionID.make(surfaceID: surfaceID) }
+    var sessionID: String { remoteSessionName ?? localSessionID }
 
     var export: String {
       "export SUPACODE_SURFACE_ID=\(ZmxAttach.shellQuote(surfaceID.uuidString)); "
@@ -507,10 +642,11 @@ nonisolated enum ZmxAttach {
     )
     let loop = SSHReconnectLoop.script(connect: connectLine, reconnect: reconnectLine)
     guard let localZmxExecutablePath else { return "/bin/sh -c " + shellQuote(loop) }
-    // The local and host-side sessions share the `supa-<surfaceID>` name.
+    // The local wrapper is always owned by this surface. A discovered tab may
+    // use a different exact name on the host.
     return buildCommand(
       executablePath: localZmxExecutablePath,
-      sessionID: launch.sessionID,
+      sessionID: launch.localSessionID,
       userCommand: loop
     )
   }
@@ -553,7 +689,7 @@ nonisolated enum ZmxAttach {
     return launch.export
       + brewPathPrefix
       + "if command -v zmx >/dev/null 2>&1; then "
-      + "zmx attach \(launch.sessionID) \(sessionCommand)\n"
+      + "zmx attach \(loginShellQuoteSessionName(launch.sessionID)) \(sessionCommand)\n"
       + "supa_rc=$?\n"
       + "[ \"$supa_rc\" -eq 0 ] && exit 0\n"
       + #"printf '\033[1;31m── zmx attach exited with status %s. "#
@@ -581,8 +717,8 @@ nonisolated enum ZmxAttach {
     return launch.export
       + brewPathPrefix
       + "if command -v zmx >/dev/null 2>&1; then "
-      + "if zmx list --short 2>/dev/null | grep -q '\(launch.sessionID)$'; then "
-      + "exec zmx attach \(launch.sessionID)\n"
+      + "if zmx list --short 2>/dev/null | \(sessionProbe(launch.sessionID)); then "
+      + "exec zmx attach \(loginShellQuoteSessionName(launch.sessionID))\n"
       + "fi\n"
       + sessionEndedNotice + "exit 0\n"
       + "fi\n"
@@ -599,7 +735,8 @@ nonisolated enum ZmxAttach {
     host: RemoteHost,
     sessionID: String
   ) -> (executableURL: URL, arguments: [String]) {
-    SSHCommand.invocation(
+    let quotedSessionID = loginShellQuoteSessionName(sessionID)
+    return SSHCommand.invocation(
       host: host,
       executable: "/bin/sh",
       // `|| exit 0`, not `&&`: a host without zmx must exit 0 (true no-op),
@@ -610,12 +747,31 @@ nonisolated enum ZmxAttach {
       arguments: [
         "-c",
         brewPathPrefix
-          + "command -v zmx >/dev/null 2>&1 || exit 0; zmx kill \(sessionID); "
-          + "! zmx list --short 2>/dev/null | grep -q '\(sessionID)$'",
+          + "command -v zmx >/dev/null 2>&1 || exit 0; zmx kill \(quotedSessionID); "
+          + "! zmx list --short 2>/dev/null | \(sessionProbe(sessionID))",
       ],
       workingDirectory: nil,
       extraOptions: SSHCommand.backgroundProbeOptions
     )
+  }
+
+  static func remoteListInvocation(
+    host: RemoteHost
+  ) -> (executableURL: URL, arguments: [String]) {
+    SSHCommand.invocation(
+      host: host,
+      executable: "/bin/sh",
+      arguments: ["-c", brewPathPrefix + "zmx ls"],
+      workingDirectory: nil,
+      extraOptions: SSHCommand.backgroundProbeOptions
+    )
+  }
+
+  private static func sessionProbe(_ sessionID: String) -> String {
+    if isShellSafeSessionName(sessionID) {
+      return "grep -q '\(sessionID)$'"
+    }
+    return "grep -F -q -- \(SSHCommand.loginShellQuote(sessionID))"
   }
 
   /// Appends the well-known tool directories to `PATH` before every `zmx`

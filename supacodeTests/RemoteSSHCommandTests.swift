@@ -133,6 +133,14 @@ struct RemoteHostTests {
 }
 
 struct SSHCommandTests {
+  @Test func configurationInvocationUsesSSHConfigWithoutConnecting() {
+    let invocation = SSHCommand.configurationInvocation(
+      host: RemoteHost(alias: "strix", username: "saparow", port: 2222)
+    )
+    #expect(invocation.executableURL.path == SSHCommand.sshExecutablePath)
+    #expect(invocation.arguments == ["-G", "-p", "2222", "saparow@strix"])
+  }
+
   @Test func shellQuoteWrapsAndEscapesSingleQuotes() {
     #expect(SSHCommand.shellQuote("echo hi") == "'echo hi'")
     #expect(SSHCommand.shellQuote("echo 'hi'") == "'echo '\\''hi'\\'''")
@@ -561,6 +569,29 @@ struct ZmxAttachRemoteTests {
   private let localZmx = "/Applications/Supacode.app/Contents/MacOS/zmx"
   private static let defaultShell = "cd '/home/dev/repo/wt-1' 2>/dev/null; exec \"$SHELL\" -l"
 
+  @Test func arbitraryRemoteSessionNamesAreQuotedInEveryShellLayer() {
+    let name = "dev shell;$(id)"
+    let launch = ZmxAttach.RemoteSurfaceLaunch(
+      host: RemoteHost(alias: "devbox"),
+      surfaceID: surfaceID,
+      remoteSessionName: name,
+      userCommand: nil,
+      defaultCommand: Self.defaultShell,
+      hostPersistenceEnabled: true
+    )
+
+    let script = ZmxAttach.remoteConnectScript(launch)
+    #expect(script.contains("zmx attach \(SSHCommand.loginShellQuote(name))"))
+
+    let reconnect = ZmxAttach.remoteReconnectScript(launch)
+    #expect(reconnect.contains("grep -F -q -- \(SSHCommand.loginShellQuote(name))"))
+    #expect(reconnect.contains("exec zmx attach \(SSHCommand.loginShellQuote(name))"))
+
+    let command = ZmxAttach.buildRemoteCommand(launch, localZmxExecutablePath: localZmx)
+    #expect(command.contains("attach \(ZmxSessionID.make(surfaceID: surfaceID))"))
+    #expect(!command.contains("attach \(name)"))
+  }
+
   private func makeLaunch(
     host: RemoteHost = RemoteHost(alias: "devbox"),
     userCommand: String? = nil,
@@ -570,6 +601,7 @@ struct ZmxAttachRemoteTests {
     ZmxAttach.RemoteSurfaceLaunch(
       host: host,
       surfaceID: surfaceID,
+      remoteSessionName: nil,
       userCommand: userCommand,
       defaultCommand: defaultCommand,
       hostPersistenceEnabled: hostPersistenceEnabled

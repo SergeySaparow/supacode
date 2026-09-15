@@ -628,6 +628,47 @@ extension LayoutFeature {
     return .none
   }
 
+  /// Transfers topology without closing or recreating the content session.
+  func transferTab(
+    _ tabID: TabID, from source: inout State, to destination: inout State,
+    origin: TerminalSessionOrigin? = nil
+  ) -> Bool {
+    guard source.id != destination.id,
+      var pane = source.layout.pane(containingTab: tabID),
+      let index = pane.tabs.index(id: tabID),
+      !pane.tabs[index].isLocked,
+      source.alert == nil, destination.alert == nil
+    else { return false }
+    var tab = pane.tabs.remove(at: index)
+    if let origin, case .terminal(var terminal) = tab.content.state {
+      if terminal.sessionOrigin == nil { terminal.sessionOrigin = origin }
+      (contentRuntime.content(for: tab.content.id) as? TerminalContent)?.preserveSessionOrigin(origin)
+      tab.content = ContentSnapshot(id: tab.content.id, state: .terminal(terminal))
+    }
+    releaseTabBookkeeping(&source, tabID: tabID)
+    if pane.tabs.isEmpty {
+      collapse(&source, paneID: pane.id)
+    } else {
+      if pane.selectedTabID == tabID {
+        pane.selectedTabID = pane.tabs[max(0, index - 1)].id
+      }
+      source.layout.panes[id: pane.id] = pane
+    }
+    if let targetID = destination.layout.focusedPaneID ?? destination.layout.panes.first?.id {
+      destination.layout.panes[id: targetID]?.tabs.append(tab)
+      destination.layout.panes[id: targetID]?.selectedTabID = tabID
+      focus(&destination, paneID: targetID)
+    } else {
+      let targetID = PaneID()
+      destination.layout = PaneLayout(
+        tree: SplitTree(view: targetID),
+        panes: [Pane(id: targetID, tabs: [tab], selectedTabID: tabID)],
+        focusedPaneID: targetID
+      )
+    }
+    return true
+  }
+
   /// Moves an existing tab into a brand-new pane split off the anchor,
   /// collapsing the source pane when the move empties it.
   private func reduceMoveTabToSplit(

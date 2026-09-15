@@ -1,12 +1,35 @@
 import AppKit
 import Foundation
 import IdentifiedCollections
+import SupacodeSettingsShared
 import Testing
 
 @testable import supacode
 
 @MainActor
 struct LayoutPersistenceTests {
+  @Test func persistenceKeepsSessionOriginWhileStrippingLaunchState() throws {
+    let origin = TerminalSessionOrigin(
+      Worktree(
+        id: WorktreeID("original"), name: "source", detail: "",
+        workingDirectory: URL(filePath: "/source"), repositoryRootURL: URL(filePath: "/source"),
+        host: RemoteHost(alias: "source-server")))
+    let contentID = ContentID()
+    let runtime = ContentRuntime()
+    _ = runtime.provision(
+      StubContent(
+        id: contentID,
+        snapshotState: TerminalContentState(
+          workingDirectory: "/source/cwd", sessionOrigin: origin,
+          launch: LaunchOverride(command: "one-shot"))), at: .fallback)
+    let record = LayoutPersistence.record(
+      for: layout(paneID: PaneID(), tabID: TabID(), contentID: contentID), runtime: runtime)
+    let restored = try JSONDecoder().decode(LayoutRecord.self, from: JSONEncoder().encode(record))
+    guard case .terminal(let state) = restored.layout.panes[0].tabs[0].content.state else { return }
+    #expect(state.sessionOrigin == origin)
+    #expect(state.launch == nil)
+  }
+
   private final class StubContent: TabContent {
     let id: ContentID
     let kind: ContentKind = .terminal
@@ -221,6 +244,43 @@ struct LayoutPersistenceTests {
     let decoded = try JSONDecoder().decode(TerminalContentState.self, from: data)
     #expect(decoded.launch == nil)
     #expect(decoded.workingDirectory == "/w")
+  }
+
+  @Test func persistsRemoteSessionIdentity() throws {
+    let state = TerminalContentState(
+      workingDirectory: nil,
+      sessionName: "agent shell;prod",
+      isDiscovered: true
+    )
+    let data = try JSONEncoder().encode(state)
+    let decoded = try JSONDecoder().decode(TerminalContentState.self, from: data)
+    #expect(decoded.sessionName == "agent shell;prod")
+    #expect(decoded.isDiscovered)
+  }
+
+  @Test func layoutPersistenceKeepsRemoteSessionIdentity() {
+    let paneID = PaneID()
+    let tabID = TabID()
+    let contentID = ContentID()
+    var stored = layout(paneID: paneID, tabID: tabID, contentID: contentID)
+    stored.panes[id: paneID]?.tabs[id: tabID]?.content = ContentSnapshot(
+      id: contentID,
+      state: .terminal(
+        TerminalContentState(
+          workingDirectory: nil,
+          sessionName: "manual shell",
+          isDiscovered: true
+        )
+      )
+    )
+
+    let result = LayoutPersistence.record(for: stored, runtime: ContentRuntime())
+    guard case .terminal(let state) = result.layout.panes[id: paneID]?.tabs[id: tabID]?.content.state else {
+      Issue.record("Expected a terminal payload.")
+      return
+    }
+    #expect(state.sessionName == "manual shell")
+    #expect(state.isDiscovered)
   }
 
   @Test func overlaysLiveAgentRecordsPerContent() {

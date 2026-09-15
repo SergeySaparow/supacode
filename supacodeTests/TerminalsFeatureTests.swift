@@ -65,6 +65,98 @@ struct TerminalsFeatureTests {
     )
   }
 
+  @Test(arguments: [false, true], [false, true])
+  func transferTabBetweenFoldersPreservesContent(sourceHasSibling: Bool, targetHasTab: Bool) async {
+    let sourceID = Worktree.ID("ermi")
+    let targetID = Worktree.ID("ph")
+    let paneID = PaneID()
+    let tabID = TabID()
+    let contentID = ContentID()
+    let siblingID = TabID()
+    var initial = TerminalsFeature.State()
+    initial.layouts = [
+      LayoutFeature.State(id: sourceID, layout: Self.layout(paneID: paneID, tabID: tabID, contentID: contentID)),
+      LayoutFeature.State(id: targetID, layout: targetHasTab
+        ? Self.layout(paneID: PaneID(), tabID: TabID(), contentID: ContentID()) : PaneLayout()),
+    ]
+    let original = initial.layouts[id: sourceID]!.layout.panes[0].tabs[0]
+    if sourceHasSibling {
+      initial.layouts[id: sourceID]!.layout.panes[id: paneID]!.tabs.append(
+        TabItem(id: siblingID, title: "Sibling", content: ContentSnapshot(
+          id: ContentID(), state: .terminal(TerminalContentState(workingDirectory: nil)))))
+    }
+    let runtime = ContentRuntime()
+    let content = HibernatableContent(id: contentID)
+    _ = runtime.provision(content, at: ContentGeometry.fallback)
+    let renderer = content.renderer
+    let store = TestStore(initialState: initial) { TerminalsFeature() } withDependencies: {
+      $0.contentRuntime = runtime
+      $0.continuousClock = TestClock()
+    }
+    store.exhaustivity = .off
+    await store.send(.transferTab(id: tabID, toWorktree: targetID))
+    let source = store.state.layouts[id: sourceID]!.layout
+    #expect(source.pane(containingTab: tabID) == nil)
+    #expect(source.panes.first?.selectedTabID == (sourceHasSibling ? siblingID : nil))
+    let destination = store.state.layouts[id: targetID]!.layout
+    #expect(destination.panes.first?.tabs.last == original)
+    #expect(destination.panes.first?.tabs.count == (targetHasTab ? 2 : 1))
+    #expect(destination.panes.first?.selectedTabID == tabID)
+    #expect(destination.isConsistent && source.isConsistent)
+    #expect(content.renderer === renderer)
+    #expect(content.startCalls == 1)
+    await store.finish()
+  }
+
+  @Test func repeatedMovesRetainTheFirstSessionOrigin() async {
+    let sourceID = Worktree.ID("ermi")
+    let targetID = Worktree.ID("ph")
+    let tabID = TabID()
+    let source = Worktree(
+      id: sourceID, name: "Ermi", detail: "",
+      workingDirectory: URL(filePath: "/ermi"), repositoryRootURL: URL(filePath: "/ermi"),
+      host: RemoteHost(alias: "original"))
+    let target = Worktree(
+      id: targetID, name: "PH", detail: "",
+      workingDirectory: URL(filePath: "/ph"), repositoryRootURL: URL(filePath: "/ph"),
+      host: RemoteHost(alias: "destination"))
+    let store = TestStore(
+      initialState: TerminalsFeature.State(layouts: [
+        LayoutFeature.State(id: sourceID, layout: Self.layout(paneID: PaneID(), tabID: tabID, contentID: ContentID())),
+        LayoutFeature.State(id: targetID, layout: PaneLayout()),
+      ])
+    ) {
+      TerminalsFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+    }
+    store.exhaustivity = .off
+    await store.send(.transferTab(id: tabID, toWorktree: targetID, origin: TerminalSessionOrigin(source)))
+    await store.send(.transferTab(id: tabID, toWorktree: sourceID, origin: TerminalSessionOrigin(target)))
+    let tab = store.state.layouts[id: sourceID]!.layout.panes[0].tabs[0]
+    guard case .terminal(let terminal) = tab.content.state else { return }
+    #expect(terminal.sessionOrigin == TerminalSessionOrigin(source))
+    await store.finish()
+  }
+
+  @Test func transferTabRejectsInvalidDestinationAndLockedTabs() async {
+    let sourceID = Worktree.ID("ermi")
+    let targetID = Worktree.ID("ph")
+    let paneID = PaneID()
+    let tabID = TabID()
+    var initial = TerminalsFeature.State()
+    initial.layouts = [
+      LayoutFeature.State(id: sourceID, layout: Self.layout(paneID: paneID, tabID: tabID, contentID: ContentID())),
+      LayoutFeature.State(id: targetID, layout: PaneLayout()),
+    ]
+    initial.layouts[id: sourceID]!.layout.panes[id: paneID]!.tabs[id: tabID]!.isLocked = true
+    let store = TestStore(initialState: initial) { TerminalsFeature() }
+    await store.send(.transferTab(id: tabID, toWorktree: targetID))
+    await store.send(.transferTab(id: tabID, toWorktree: sourceID))
+    await store.send(.transferTab(id: tabID, toWorktree: Worktree.ID("missing")))
+    await store.send(.transferTab(id: TabID(), toWorktree: targetID))
+  }
+
   // MARK: - Hibernation.
 
   private struct HibernationHarness {

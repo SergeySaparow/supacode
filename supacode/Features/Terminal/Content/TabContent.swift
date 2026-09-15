@@ -207,12 +207,19 @@ final class TerminalContent: TabContent {
     return ContentSnapshot(id: id, state: .terminal(recordedState(from: surfaceView)))
   }
 
+  func preserveSessionOrigin(_ origin: TerminalSessionOrigin) {
+    if state.sessionOrigin == nil { state.sessionOrigin = origin }
+  }
+
   // Live values when the surface can report them, else the last recorded ones.
   private func recordedState(from surfaceView: GhosttySurfaceView) -> TerminalContentState {
     TerminalContentState(
       workingDirectory: surfaceView.bridge.state.pwd ?? state.workingDirectory,
       agents: state.agents,
       frozenGrid: surfaceView.captureFrozenGrid() ?? state.frozenGrid,
+      sessionName: state.sessionName,
+      isDiscovered: state.isDiscovered,
+      sessionOrigin: state.sessionOrigin,
       launch: state.launch
     )
   }

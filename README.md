@@ -32,13 +32,19 @@ Point Supacode at a repository on a remote host over SSH and it manages that rep
 like a local one. Every git probe and the terminal share one multiplexed SSH connection, so you
 authenticate (or touch your security key) once. When the host has zmx, remote sessions survive
 dropped connections and laptop sleep: the connection retries and reattaches instead of
-restarting. Beta, with some local-only features reduced.
+restarting. Enable “Discover ZMX sessions” in Terminal settings to scan and show sessions created
+outside Supacode as tabs in one folder per local or remote endpoint. Discovery never deletes sessions;
+an explicit close is required. Beta, with some local-only features reduced.
 
 ### Folders and repositories
 
 Git repositories and plain folders are both first-class in the sidebar. A folder gets a real
 persistent terminal rooted there, with the same tabs, scripts, pinning, and appearance as a repo,
-minus the git-only tools. You can also clone a remote URL straight into a folder.
+minus the git-only tools. Drag a terminal tab onto another folder or worktree in the sidebar
+to move it there without restarting its session, including between folders on different SSH
+hosts. Each tab retains its original server and working directory across moves and restarts;
+locked script tabs stay in their original location. You can also clone
+a remote URL straight into a folder.
 
 ### Coding agent presence
 

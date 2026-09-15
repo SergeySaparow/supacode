@@ -35,9 +35,6 @@ struct TerminalClient {
   /// Close every tracked surface and kill its zmx session in parallel.
   /// Awaited from the quit path so teardown completes before process exit.
   var terminateAllSessions: @MainActor @Sendable () async -> Void
-  /// Kill `supa-*` sessions hosted by the daemon that no persisted layout
-  /// references. Called at launch to clean up crash / force-quit orphans.
-  var reapOrphanSessions: @MainActor @Sendable (_ knownSurfaceIDs: Set<UUID>) async -> Void
   /// Persist layouts with embedded per-surface agent records. Called on
   /// background and on quit so a force-quit between them caps staleness.
   var saveLayoutsWithAgents:
@@ -185,7 +182,6 @@ extension TerminalClient: DependencyKey {
     markAllNotificationsRead: { fatalError("TerminalClient.markAllNotificationsRead not configured") },
     hasInflightBlockingScripts: { fatalError("TerminalClient.hasInflightBlockingScripts not configured") },
     terminateAllSessions: { fatalError("TerminalClient.terminateAllSessions not configured") },
-    reapOrphanSessions: { _ in fatalError("TerminalClient.reapOrphanSessions not configured") },
     saveLayoutsWithAgents: { _ in fatalError("TerminalClient.saveLayoutsWithAgents not configured") }
   )
 
@@ -209,7 +205,6 @@ extension TerminalClient: DependencyKey {
     markAllNotificationsRead: unimplemented("TerminalClient.markAllNotificationsRead"),
     hasInflightBlockingScripts: unimplemented("TerminalClient.hasInflightBlockingScripts", placeholder: false),
     terminateAllSessions: unimplemented("TerminalClient.terminateAllSessions"),
-    reapOrphanSessions: unimplemented("TerminalClient.reapOrphanSessions"),
     saveLayoutsWithAgents: unimplemented("TerminalClient.saveLayoutsWithAgents")
   )
 }

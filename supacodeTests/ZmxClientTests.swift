@@ -190,41 +190,64 @@ struct ZmxResolveLaunchTests {
 
 @MainActor
 struct ZmxSessionListParserTests {
-  @Test func parsesClientsZero() {
+  @Test func ignoresClientCountMetadata() {
     let entries = ZmxSessionListParser.parse("name=supa-abc\tpid=123\tclients=0\tcreated=0\n")
-    #expect(entries == [.init(name: "supa-abc", clients: 0)])
+    #expect(entries == [.init(name: "supa-abc")])
   }
 
-  @Test func parsesClientsPositive() {
-    let entries = ZmxSessionListParser.parse("name=supa-abc\tpid=123\tclients=2\tcreated=0\n")
-    #expect(entries == [.init(name: "supa-abc", clients: 2)])
-  }
-
-  @Test func errOrStatusLineYieldsNilClients() {
+  @Test func parsesSessionNameFromErrOrStatusLine() {
     let entries = ZmxSessionListParser.parse(
       "name=supa-abc\terr=ConnectionRefused\tstatus=cleaning up\n"
     )
-    #expect(entries == [.init(name: "supa-abc", clients: nil)])
+    #expect(entries == [.init(name: "supa-abc")])
   }
 
   @Test func stripsCurrentSessionArrowPrefix() {
     let entries = ZmxSessionListParser.parse("→ name=supa-abc\tpid=1\tclients=1\tcreated=0\n")
-    #expect(entries == [.init(name: "supa-abc", clients: 1)])
+    #expect(entries == [.init(name: "supa-abc")])
   }
 
   @Test func stripsLeadingIndentOnNonCurrentSessions() {
     let entries = ZmxSessionListParser.parse("  name=supa-abc\tclients=0\tpid=1\tcreated=0\n")
-    #expect(entries == [.init(name: "supa-abc", clients: 0)])
+    #expect(entries == [.init(name: "supa-abc")])
   }
 
-  @Test func filtersNonSupaSessions() {
+  @Test func keepsArbitrarySessionNames() {
     let entries = ZmxSessionListParser.parse(
       """
-      name=dev\tpid=1\tclients=2\tcreated=0
+      name=dev shell;$(id)\tpid=1\tclients=2\tcreated=0
       name=supa-abc\tpid=2\tclients=0\tcreated=0
-      """
+      """, includingExternalNames: true
     )
-    #expect(entries == [.init(name: "supa-abc", clients: 0)])
+    #expect(
+      entries == [
+        .init(name: "dev shell;$(id)"),
+        .init(name: "supa-abc"),
+      ]
+    )
+  }
+
+  @Test func localListingStillIgnoresExternalSessionNames() {
+    let entries = ZmxSessionListParser.parse(
+      "name=manual\tpid=1\tclients=0\tcreated=0\n"
+    )
+    #expect(entries.isEmpty)
+  }
+
+  @Test func remoteListingCanIncludeExternalSessionNames() {
+    let entries = ZmxSessionListParser.parse(
+      "name=manual shell\tpid=1\tclients=0\tcreated=0\n",
+      includingExternalNames: true
+    )
+    #expect(entries == [.init(name: "manual shell")])
+  }
+
+  @Test func localDiscoveryListingIncludesExternalSessionNames() {
+    let entries = ZmxSessionListParser.parse(
+      "name=New_1\tpid=1\tclients=1\tcreated=0\n",
+      includingExternalNames: true
+    )
+    #expect(entries == [.init(name: "New_1")])
   }
 
   @Test func dropsBlankAndMalformedLines() {
@@ -236,8 +259,16 @@ struct ZmxSessionListParserTests {
 
       """
     )
-    #expect(entries == [.init(name: "supa-keep", clients: 3)])
+    #expect(entries == [.init(name: "supa-keep")])
   }
+
+  @Test func remoteListInvocationRunsZmxLsOnTheHost() {
+    let invocation = ZmxAttach.remoteListInvocation(host: RemoteHost(alias: "devbox"))
+    #expect(invocation.executableURL == URL(filePath: "/usr/bin/ssh"))
+    #expect(invocation.arguments.contains { $0.contains("zmx ls") })
+    #expect(invocation.arguments.contains("BatchMode=yes"))
+  }
+
 }
 
 @MainActor
@@ -260,7 +291,7 @@ struct ZmxClientKillSurfaceSessionsTests {
       isBundled: { true },
       killSession: { _ in await recorder.record("local") },
       killRemoteSession: { _, _ in await recorder.record("remote") },
-      listSessionsWithClients: { nil },
+      listRemoteSessions: { _ in nil }
     )
   }
 

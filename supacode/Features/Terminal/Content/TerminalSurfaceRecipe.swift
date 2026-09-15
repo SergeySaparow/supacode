@@ -30,7 +30,8 @@ nonisolated enum TerminalSurfaceRecipe {
     _ intent: LaunchIntent,
     for worktree: Worktree,
     surfaceID: UUID,
-    zmxExecutablePath: String?
+    zmxExecutablePath: String?,
+    remoteSessionName: String? = nil
   ) -> Launch {
     let command = intent.command
     let initialInput = intent.initialInput
@@ -49,10 +50,12 @@ nonisolated enum TerminalSurfaceRecipe {
       let remote = ZmxAttach.RemoteSurfaceLaunch(
         host: host,
         surfaceID: surfaceID,
+        remoteSessionName: remoteSessionName,
         userCommand: command,
         defaultCommand: remoteDefaultShellCommand(
           remotePath: worktree.workingDirectory.path(percentEncoded: false)),
-        hostPersistenceEnabled: settingsFile.global.remoteSessionPersistenceEnabled,
+        hostPersistenceEnabled:
+          settingsFile.global.remoteSessionPersistenceEnabled || remoteSessionName != nil,
       )
       return Launch(
         command: ZmxAttach.buildRemoteCommand(remote, localZmxExecutablePath: zmxExecutablePath),
@@ -63,7 +66,7 @@ nonisolated enum TerminalSurfaceRecipe {
     }
     let resolved = ZmxAttach.resolveLaunch(
       executablePath: zmxExecutablePath,
-      sessionID: ZmxSessionID.make(surfaceID: surfaceID),
+      sessionID: remoteSessionName ?? ZmxSessionID.make(surfaceID: surfaceID),
       command: command,
     )
     return Launch(
@@ -193,6 +196,7 @@ nonisolated enum TerminalSurfaceRecipe {
   /// request's identity and its terminal payload.
   @MainActor
   static func plan(for request: ContentRequest, seed: PlanSeed) -> SurfacePlan {
+    let worktree = seed.terminalState.sessionOrigin?.applying(to: seed.worktree) ?? seed.worktree
     let override = seed.terminalState.launch
     let launch = launch(
       LaunchIntent(
@@ -200,19 +204,20 @@ nonisolated enum TerminalSurfaceRecipe {
         initialInput: override?.initialInput,
         bypassZmx: override?.bypassZmx ?? false
       ),
-      for: seed.worktree,
+      for: worktree,
       surfaceID: request.contentID.rawValue,
-      zmxExecutablePath: seed.zmxExecutablePath
+      zmxExecutablePath: seed.zmxExecutablePath,
+      remoteSessionName: seed.terminalState.sessionName
     )
     let context = context(for: request.origin)
     let inherited = inheritedConfig(from: seed.inheritedFrom, context: context)
     // Remote worktrees have no local working directory: the surface command is
     // an `ssh` line and the cwd lives on the remote.
     let workingDirectory: URL? =
-      seed.worktree.host == nil
+      worktree.host == nil
       ? seed.terminalState.workingDirectory.map { URL(filePath: $0, directoryHint: .isDirectory) }
         ?? inherited.workingDirectory
-        ?? seed.worktree.workingDirectory
+        ?? worktree.workingDirectory
       : nil
     // A woken surface keeps its frozen font: the frozen backing size only
     // reproduces the grid when the font, and so the cell size, matches.
@@ -225,7 +230,7 @@ nonisolated enum TerminalSurfaceRecipe {
       initialInput: launch.initialInput,
       commandWrapper: launch.commandWrapper,
       environment: environment(
-        for: seed.worktree,
+        for: worktree,
         tabID: request.tabID,
         surfaceID: request.contentID.rawValue,
         socketPath: seed.socketPath,
@@ -296,6 +301,7 @@ struct TerminalContentBuilder {
   var wireSurface: (GhosttySurfaceView, ContentRequest) -> Void
   /// Extra environment for a spawning surface (blocking-script markers).
   var environmentExtras: (ContentRequest) -> [String: String]
+  var owningWorktree: (ContentID) -> Worktree? = { _ in nil }
 
   func factory() -> LayoutContentFactory {
     LayoutContentFactory { request in
@@ -318,15 +324,22 @@ struct TerminalContentBuilder {
       return InertTabContent(id: request.contentID, state: request.content)
     }
     let lookUpWorktree = worktree
+    var initialState = terminalState
+    if initialState.sessionOrigin == nil {
+      initialState.sessionOrigin = TerminalSessionOrigin(capturedWorktree)
+    }
     return TerminalContent(
       id: request.contentID,
       makeSurface: { geometry, currentState, phase in
         // Re-resolve so a wake long after creation sees the current worktree;
         // the captured value only covers one that vanished mid-flight.
-        let worktree = lookUpWorktree(request.worktreeID) ?? capturedWorktree
+        let worktree =
+          owningWorktree(request.contentID) ?? lookUpWorktree(request.worktreeID)
+          ?? capturedWorktree
         // One-shot inheritance: a re-wake must not re-read the source's
         // current cwd/font or its split context.
         var effective = request
+        effective.worktreeID = worktree.id
         var seedState = currentState
         if phase == .rewake {
           effective.origin = .restored
@@ -339,7 +352,10 @@ struct TerminalContentBuilder {
           seedState = TerminalContentState(
             workingDirectory: currentState.workingDirectory,
             agents: currentState.agents,
-            frozenGrid: currentState.frozenGrid
+            frozenGrid: currentState.frozenGrid,
+            sessionName: currentState.sessionName,
+            isDiscovered: currentState.isDiscovered,
+            sessionOrigin: currentState.sessionOrigin
           )
         }
         let plan = TerminalSurfaceRecipe.plan(
@@ -372,7 +388,7 @@ struct TerminalContentBuilder {
         wireSurface(view, effective)
         return TerminalContent.SpawnedSurface(view: view, usesZmx: plan.usesZmx)
       },
-      initialState: terminalState
+      initialState: initialState
     )
   }
 }

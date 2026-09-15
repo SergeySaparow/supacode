@@ -1,5 +1,6 @@
 import Foundation
 import GhosttyKit
+import SupacodeSettingsShared
 import Testing
 
 @testable import supacode
@@ -16,6 +17,41 @@ struct TerminalSurfaceRecipeTests {
       workingDirectory: URL(filePath: "/tmp/recipe-fixture/wt", directoryHint: .notDirectory),
       repositoryRootURL: URL(filePath: "/tmp/recipe-fixture", directoryHint: .notDirectory)
     )
+  }
+
+  private static func makeRemoteWorktree() -> Worktree {
+    Worktree(
+      id: WorktreeID("remote://devbox/tmp/recipe-fixture/wt"),
+      name: "wt",
+      detail: "detail",
+      workingDirectory: URL(filePath: "/tmp/recipe-fixture/wt", directoryHint: .notDirectory),
+      repositoryRootURL: URL(filePath: "/tmp/recipe-fixture", directoryHint: .notDirectory),
+      host: RemoteHost(alias: "devbox")
+    )
+  }
+
+  @Test(arguments: [false, true])
+  func movedSessionKeepsItsOriginalEndpointAfterRoundTrip(remoteSource: Bool) throws {
+    let source = remoteSource ? Self.makeRemoteWorktree() : Self.makeWorktree()
+    let destination = remoteSource ? Self.makeWorktree() : Self.makeRemoteWorktree()
+    let state = TerminalContentState(
+      workingDirectory: "/original/cwd", sessionOrigin: TerminalSessionOrigin(source))
+    let restored = try JSONDecoder().decode(TerminalContentState.self, from: JSONEncoder().encode(state))
+    let resolved = try #require(restored.sessionOrigin).applying(to: destination)
+    #expect(resolved.host == source.host)
+    #expect(resolved.workingDirectory == source.workingDirectory)
+    #expect(resolved.repositoryRootURL == source.repositoryRootURL)
+    #expect(resolved.id == destination.id)
+    #expect(restored.workingDirectory == "/original/cwd")
+    let plan = TerminalSurfaceRecipe.plan(
+      for: Self.makeRequest(state: restored, origin: .restored),
+      seed: TerminalSurfaceRecipe.PlanSeed(
+        terminalState: restored, worktree: destination, socketPath: nil,
+        zmxExecutablePath: "/tmp/zmx"
+      )
+    )
+    #expect((plan.workingDirectory == nil) == remoteSource)
+    #expect(plan.environment["SUPACODE_WORKTREE_PATH"] == source.workingDirectory.path(percentEncoded: false))
   }
 
   @Test func environmentCarriesIdentityMarkers() {
@@ -83,6 +119,32 @@ struct TerminalSurfaceRecipeTests {
     // both address it by this derivation.
     #expect(launch.usesZmx)
     #expect(launch.commandWrapper.contains(ZmxSessionID.make(surfaceID: surfaceID)))
+  }
+
+  @Test func localLaunchCanAttachToAnExternallyNamedSession() {
+    let launch = TerminalSurfaceRecipe.launch(
+      TerminalSurfaceRecipe.LaunchIntent(),
+      for: Self.makeWorktree(),
+      surfaceID: UUID(),
+      zmxExecutablePath: "/usr/local/bin/zmx",
+      remoteSessionName: "New_1"
+    )
+    #expect(launch.commandWrapper == ["/usr/local/bin/zmx", "attach", "New_1"])
+  }
+
+  @Test func remoteLaunchUsesThePersistedSessionName() {
+    let name = "agent shell;prod"
+    let remote = ZmxAttach.RemoteSurfaceLaunch(
+      host: RemoteHost(alias: "devbox"),
+      surfaceID: UUID(),
+      remoteSessionName: name,
+      userCommand: nil,
+      defaultCommand: nil,
+      hostPersistenceEnabled: true
+    )
+    let script = ZmxAttach.remoteConnectScript(remote)
+    #expect(script.contains("zmx attach \(SSHCommand.loginShellQuote(name))"))
+    #expect(script.contains("zmx attach \(name)") == false)
   }
 
   // MARK: - Surface plans.
