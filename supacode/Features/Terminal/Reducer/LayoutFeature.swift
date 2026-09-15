@@ -629,14 +629,22 @@ extension LayoutFeature {
   }
 
   /// Transfers topology without closing or recreating the content session.
-  func transferTab(_ tabID: TabID, from source: inout State, to destination: inout State) -> Bool {
+  func transferTab(
+    _ tabID: TabID, from source: inout State, to destination: inout State,
+    origin: TerminalSessionOrigin? = nil
+  ) -> Bool {
     guard source.id != destination.id,
       var pane = source.layout.pane(containingTab: tabID),
       let index = pane.tabs.index(id: tabID),
       !pane.tabs[index].isLocked,
       source.alert == nil, destination.alert == nil
     else { return false }
-    let tab = pane.tabs.remove(at: index)
+    var tab = pane.tabs.remove(at: index)
+    if let origin, case .terminal(var terminal) = tab.content.state {
+      if terminal.sessionOrigin == nil { terminal.sessionOrigin = origin }
+      (contentRuntime.content(for: tab.content.id) as? TerminalContent)?.preserveSessionOrigin(origin)
+      tab.content = ContentSnapshot(id: tab.content.id, state: .terminal(terminal))
+    }
     releaseTabBookkeeping(&source, tabID: tabID)
     if pane.tabs.isEmpty {
       collapse(&source, paneID: pane.id)

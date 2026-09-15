@@ -46,6 +46,27 @@ nonisolated struct LaunchOverride: Equatable, Codable, Sendable {
   }
 }
 
+/// Session connection and fallback paths, independent of its sidebar folder.
+/// A non-nil origin with a nil host explicitly identifies a local session.
+nonisolated struct TerminalSessionOrigin: Equatable, Codable, Sendable {
+  let host: RemoteHost?
+  let workingDirectory: URL
+  let repositoryRootURL: URL
+
+  init(_ worktree: Worktree) {
+    host = worktree.host
+    workingDirectory = worktree.workingDirectory
+    repositoryRootURL = worktree.repositoryRootURL
+  }
+
+  func applying(to owner: Worktree) -> Worktree {
+    Worktree(
+      id: owner.id, kind: owner.kind, name: owner.name, detail: owner.detail,
+      workingDirectory: workingDirectory, repositoryRootURL: repositoryRootURL, host: host
+    )
+  }
+}
+
 /// Terminal-specific persisted state; the generic layout never sees grids.
 nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
   let workingDirectory: String?
@@ -57,6 +78,7 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
   /// True when this tab was imported from a zmx listing. The exact session name
   /// is retained so an explicit close can terminate the imported session.
   let isDiscovered: Bool
+  var sessionOrigin: TerminalSessionOrigin?
   /// Live-only launch override; the persistence path always strips it.
   let launch: LaunchOverride?
 
@@ -66,6 +88,7 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     case frozenGrid
     case sessionName
     case isDiscovered
+    case sessionOrigin
   }
 
   init(
@@ -74,6 +97,7 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     frozenGrid: FrozenGrid? = nil,
     sessionName: String? = nil,
     isDiscovered: Bool = false,
+    sessionOrigin: TerminalSessionOrigin? = nil,
     launch: LaunchOverride? = nil
   ) {
     self.workingDirectory = workingDirectory
@@ -81,6 +105,7 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     self.frozenGrid = frozenGrid
     self.sessionName = sessionName
     self.isDiscovered = isDiscovered
+    self.sessionOrigin = sessionOrigin
     self.launch = launch
   }
 
@@ -95,6 +120,7 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     frozenGrid = (try? container.decodeIfPresent(FrozenGrid.self, forKey: .frozenGrid)) ?? nil
     sessionName = try container.decodeIfPresent(String.self, forKey: .sessionName)
     isDiscovered = try container.decodeIfPresent(Bool.self, forKey: .isDiscovered) ?? false
+    sessionOrigin = try container.decodeIfPresent(TerminalSessionOrigin.self, forKey: .sessionOrigin)
     launch = nil
   }
 
@@ -104,6 +130,7 @@ nonisolated struct TerminalContentState: Equatable, Codable, Sendable {
     try container.encodeIfPresent(agents, forKey: .agents)
     try container.encodeIfPresent(frozenGrid, forKey: .frozenGrid)
     try container.encodeIfPresent(sessionName, forKey: .sessionName)
+    try container.encodeIfPresent(sessionOrigin, forKey: .sessionOrigin)
     if isDiscovered {
       try container.encode(true, forKey: .isDiscovered)
     }

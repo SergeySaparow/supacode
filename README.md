@@ -41,8 +41,9 @@ an explicit close is required. Beta, with some local-only features reduced.
 Git repositories and plain folders are both first-class in the sidebar. A folder gets a real
 persistent terminal rooted there, with the same tabs, scripts, pinning, and appearance as a repo,
 minus the git-only tools. Drag a terminal tab onto another folder or worktree in the sidebar
-to move it there without restarting its session. Both locations must use the same SSH host
-(or both be local); locked script tabs stay in their original location. You can also clone
+to move it there without restarting its session, including between folders on different SSH
+hosts. Each tab retains its original server and working directory across moves and restarts;
+locked script tabs stay in their original location. You can also clone
 a remote URL straight into a folder.
 
 ### Coding agent presence
