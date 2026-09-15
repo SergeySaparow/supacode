@@ -47,6 +47,7 @@ enum LayoutPersistence {
               frozenGrid: state.frozenGrid,
               sessionName: state.sessionName,
               isDiscovered: state.isDiscovered,
+              sessionOrigin: state.sessionOrigin,
               launch: state.launch
             )
           )
@@ -70,7 +71,8 @@ enum LayoutPersistence {
               agents: state.agents,
               frozenGrid: state.frozenGrid,
               sessionName: state.sessionName,
-              isDiscovered: state.isDiscovered
+              isDiscovered: state.isDiscovered,
+              sessionOrigin: state.sessionOrigin
             )
           )
         )

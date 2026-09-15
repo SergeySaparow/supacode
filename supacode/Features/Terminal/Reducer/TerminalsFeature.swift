@@ -63,7 +63,7 @@ struct TerminalsFeature {
 
   enum Action {
     case layouts(IdentifiedActionOf<LayoutFeature>)
-    case transferTab(id: TabID, toWorktree: Worktree.ID)
+    case transferTab(id: TabID, toWorktree: Worktree.ID, origin: TerminalSessionOrigin? = nil)
     /// Subscribes the memory-pressure source the hibernation policy reacts to.
     case task
     /// The migrated layouts file finished loading. Consistent records become
@@ -127,11 +127,11 @@ struct TerminalsFeature {
       case .layouts:
         return reconcileHibernation(&state)
 
-      case .transferTab(let tabID, let destinationID):
+      case .transferTab(let tabID, let destinationID, let origin):
         guard
           var source = state.layouts.first(where: { $0.layout.pane(containingTab: tabID) != nil }),
           var destination = state.layouts[id: destinationID],
-          LayoutFeature().transferTab(tabID, from: &source, to: &destination)
+          LayoutFeature().transferTab(tabID, from: &source, to: &destination, origin: origin)
         else { return .none }
         state.layouts[id: source.id] = source
         state.layouts[id: destinationID] = destination

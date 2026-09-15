@@ -108,6 +108,37 @@ struct TerminalsFeatureTests {
     await store.finish()
   }
 
+  @Test func repeatedMovesRetainTheFirstSessionOrigin() async {
+    let sourceID = Worktree.ID("ermi")
+    let targetID = Worktree.ID("ph")
+    let tabID = TabID()
+    let source = Worktree(
+      id: sourceID, name: "Ermi", detail: "",
+      workingDirectory: URL(filePath: "/ermi"), repositoryRootURL: URL(filePath: "/ermi"),
+      host: RemoteHost(alias: "original"))
+    let target = Worktree(
+      id: targetID, name: "PH", detail: "",
+      workingDirectory: URL(filePath: "/ph"), repositoryRootURL: URL(filePath: "/ph"),
+      host: RemoteHost(alias: "destination"))
+    let store = TestStore(
+      initialState: TerminalsFeature.State(layouts: [
+        LayoutFeature.State(id: sourceID, layout: Self.layout(paneID: PaneID(), tabID: tabID, contentID: ContentID())),
+        LayoutFeature.State(id: targetID, layout: PaneLayout()),
+      ])
+    ) {
+      TerminalsFeature()
+    } withDependencies: {
+      $0.continuousClock = TestClock()
+    }
+    store.exhaustivity = .off
+    await store.send(.transferTab(id: tabID, toWorktree: targetID, origin: TerminalSessionOrigin(source)))
+    await store.send(.transferTab(id: tabID, toWorktree: sourceID, origin: TerminalSessionOrigin(target)))
+    let tab = store.state.layouts[id: sourceID]!.layout.panes[0].tabs[0]
+    guard case .terminal(let terminal) = tab.content.state else { return }
+    #expect(terminal.sessionOrigin == TerminalSessionOrigin(source))
+    await store.finish()
+  }
+
   @Test func transferTabRejectsInvalidDestinationAndLockedTabs() async {
     let sourceID = Worktree.ID("ermi")
     let targetID = Worktree.ID("ph")

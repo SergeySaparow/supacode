@@ -30,6 +30,30 @@ struct TerminalSurfaceRecipeTests {
     )
   }
 
+  @Test(arguments: [false, true])
+  func movedSessionKeepsItsOriginalEndpointAfterRoundTrip(remoteSource: Bool) throws {
+    let source = remoteSource ? Self.makeRemoteWorktree() : Self.makeWorktree()
+    let destination = remoteSource ? Self.makeWorktree() : Self.makeRemoteWorktree()
+    let state = TerminalContentState(
+      workingDirectory: "/original/cwd", sessionOrigin: TerminalSessionOrigin(source))
+    let restored = try JSONDecoder().decode(TerminalContentState.self, from: JSONEncoder().encode(state))
+    let resolved = try #require(restored.sessionOrigin).applying(to: destination)
+    #expect(resolved.host == source.host)
+    #expect(resolved.workingDirectory == source.workingDirectory)
+    #expect(resolved.repositoryRootURL == source.repositoryRootURL)
+    #expect(resolved.id == destination.id)
+    #expect(restored.workingDirectory == "/original/cwd")
+    let plan = TerminalSurfaceRecipe.plan(
+      for: Self.makeRequest(state: restored, origin: .restored),
+      seed: TerminalSurfaceRecipe.PlanSeed(
+        terminalState: restored, worktree: destination, socketPath: nil,
+        zmxExecutablePath: "/tmp/zmx"
+      )
+    )
+    #expect((plan.workingDirectory == nil) == remoteSource)
+    #expect(plan.environment["SUPACODE_WORKTREE_PATH"] == source.workingDirectory.path(percentEncoded: false))
+  }
+
   @Test func environmentCarriesIdentityMarkers() {
     let tabID = TabID()
     let surfaceID = UUID()

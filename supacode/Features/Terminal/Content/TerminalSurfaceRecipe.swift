@@ -196,6 +196,7 @@ nonisolated enum TerminalSurfaceRecipe {
   /// request's identity and its terminal payload.
   @MainActor
   static func plan(for request: ContentRequest, seed: PlanSeed) -> SurfacePlan {
+    let worktree = seed.terminalState.sessionOrigin?.applying(to: seed.worktree) ?? seed.worktree
     let override = seed.terminalState.launch
     let launch = launch(
       LaunchIntent(
@@ -203,7 +204,7 @@ nonisolated enum TerminalSurfaceRecipe {
         initialInput: override?.initialInput,
         bypassZmx: override?.bypassZmx ?? false
       ),
-      for: seed.worktree,
+      for: worktree,
       surfaceID: request.contentID.rawValue,
       zmxExecutablePath: seed.zmxExecutablePath,
       remoteSessionName: seed.terminalState.sessionName
@@ -213,10 +214,10 @@ nonisolated enum TerminalSurfaceRecipe {
     // Remote worktrees have no local working directory: the surface command is
     // an `ssh` line and the cwd lives on the remote.
     let workingDirectory: URL? =
-      seed.worktree.host == nil
+      worktree.host == nil
       ? seed.terminalState.workingDirectory.map { URL(filePath: $0, directoryHint: .isDirectory) }
         ?? inherited.workingDirectory
-        ?? seed.worktree.workingDirectory
+        ?? worktree.workingDirectory
       : nil
     // A woken surface keeps its frozen font: the frozen backing size only
     // reproduces the grid when the font, and so the cell size, matches.
@@ -229,7 +230,7 @@ nonisolated enum TerminalSurfaceRecipe {
       initialInput: launch.initialInput,
       commandWrapper: launch.commandWrapper,
       environment: environment(
-        for: seed.worktree,
+        for: worktree,
         tabID: request.tabID,
         surfaceID: request.contentID.rawValue,
         socketPath: seed.socketPath,
@@ -323,6 +324,10 @@ struct TerminalContentBuilder {
       return InertTabContent(id: request.contentID, state: request.content)
     }
     let lookUpWorktree = worktree
+    var initialState = terminalState
+    if initialState.sessionOrigin == nil {
+      initialState.sessionOrigin = TerminalSessionOrigin(capturedWorktree)
+    }
     return TerminalContent(
       id: request.contentID,
       makeSurface: { geometry, currentState, phase in
@@ -349,7 +354,8 @@ struct TerminalContentBuilder {
             agents: currentState.agents,
             frozenGrid: currentState.frozenGrid,
             sessionName: currentState.sessionName,
-            isDiscovered: currentState.isDiscovered
+            isDiscovered: currentState.isDiscovered,
+            sessionOrigin: currentState.sessionOrigin
           )
         }
         let plan = TerminalSurfaceRecipe.plan(
@@ -382,7 +388,7 @@ struct TerminalContentBuilder {
         wireSurface(view, effective)
         return TerminalContent.SpawnedSurface(view: view, usesZmx: plan.usesZmx)
       },
-      initialState: terminalState
+      initialState: initialState
     )
   }
 }

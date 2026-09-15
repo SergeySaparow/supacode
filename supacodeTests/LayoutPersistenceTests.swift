@@ -1,12 +1,35 @@
 import AppKit
 import Foundation
 import IdentifiedCollections
+import SupacodeSettingsShared
 import Testing
 
 @testable import supacode
 
 @MainActor
 struct LayoutPersistenceTests {
+  @Test func persistenceKeepsSessionOriginWhileStrippingLaunchState() throws {
+    let origin = TerminalSessionOrigin(
+      Worktree(
+        id: WorktreeID("original"), name: "source", detail: "",
+        workingDirectory: URL(filePath: "/source"), repositoryRootURL: URL(filePath: "/source"),
+        host: RemoteHost(alias: "source-server")))
+    let contentID = ContentID()
+    let runtime = ContentRuntime()
+    _ = runtime.provision(
+      StubContent(
+        id: contentID,
+        snapshotState: TerminalContentState(
+          workingDirectory: "/source/cwd", sessionOrigin: origin,
+          launch: LaunchOverride(command: "one-shot"))), at: .fallback)
+    let record = LayoutPersistence.record(
+      for: layout(paneID: PaneID(), tabID: TabID(), contentID: contentID), runtime: runtime)
+    let restored = try JSONDecoder().decode(LayoutRecord.self, from: JSONEncoder().encode(record))
+    guard case .terminal(let state) = restored.layout.panes[0].tabs[0].content.state else { return }
+    #expect(state.sessionOrigin == origin)
+    #expect(state.launch == nil)
+  }
+
   private final class StubContent: TabContent {
     let id: ContentID
     let kind: ContentKind = .terminal
